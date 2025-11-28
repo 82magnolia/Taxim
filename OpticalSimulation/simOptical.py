@@ -14,11 +14,15 @@ from Basics.RawData import RawData
 from Basics.CalibData import CalibData
 import Basics.params as pr
 import Basics.sensorParams as psp
+from tqdm import tqdm
+import os
 
 parser = argparse.ArgumentParser()
 parser.add_argument("-obj", nargs='?', default='square',
                     help="Name of Object to be tested, supported_objects_list = [square, cylinder6]")
+parser.add_argument('-mode', default="single_press", type=str, help="Type of simulation to apply")
 parser.add_argument('-depth', default = 1.0, type=float, help='Indetation depth into the gelpad.')
+parser.add_argument('-depth_range_info', default = [0.1, 1.5, 100.], type=float, help='Indetation depth range information (min_depth, max_depth, num_range) into the gelpad.', nargs=3)
 args = parser.parse_args()
 
 class simulator(object):
@@ -335,20 +339,55 @@ if __name__ == "__main__":
     filePath = osp.join('..', 'data', 'objects')
     gelpad_model_path = osp.join( '..', 'calibs', 'gelmap5.npy')
     obj = args.obj + '.ply'
-    sim = simulator(data_folder, filePath, obj)
-    press_depth = args.depth
-    dx = 0
-    dy = 0
 
-    # generate height map
-    height_map, gel_map, contact_mask = sim.generateHeightMap(gelpad_model_path, press_depth, dx, dy)
-    # approximate the soft deformation
-    heightMap, contact_mask, contact_height = sim.deformApprox(press_depth, height_map, gel_map, contact_mask)
-    # simulate tactile images
-    sim_img, shadow_sim_img = sim.simulating(heightMap, contact_mask, contact_height, shadow=True)
-    img_savePath = osp.join('..', 'results', obj[:-4]+'_sim.jpg')
-    shadow_savePath = osp.join('..', 'results', obj[:-4]+'_shadow.jpg')
-    height_savePath = osp.join('..', 'results', obj[:-4]+'_height.npy')
-    cv2.imwrite(img_savePath, sim_img)
-    cv2.imwrite(shadow_savePath, shadow_sim_img)
-    np.save(height_savePath, heightMap)
+    if args.mode == "single_press":
+        sim = simulator(data_folder, filePath, obj)
+        press_depth = args.depth
+        dx = 0
+        dy = 0
+
+        # generate height map
+        height_map, gel_map, contact_mask = sim.generateHeightMap(gelpad_model_path, press_depth, dx, dy)
+        # approximate the soft deformation
+        heightMap, contact_mask, contact_height = sim.deformApprox(press_depth, height_map, gel_map, contact_mask)
+        # simulate tactile images
+        sim_img, shadow_sim_img = sim.simulating(heightMap, contact_mask, contact_height, shadow=True)
+        img_savePath = osp.join('..', 'results', obj[:-4]+'_sim.jpg')
+        shadow_savePath = osp.join('..', 'results', obj[:-4]+'_shadow.jpg')
+        height_savePath = osp.join('..', 'results', obj[:-4]+'_height.npy')
+        cv2.imwrite(img_savePath, sim_img)
+        cv2.imwrite(shadow_savePath, shadow_sim_img)
+        np.save(height_savePath, heightMap)
+    elif args.mode == "continuous_press":
+        sim = simulator(data_folder, filePath, obj)
+        press_min, press_max, num_step = args.depth_range_info
+        num_step = int(num_step)
+
+        for press_idx, press_depth in tqdm(enumerate(np.linspace(press_min, press_max, num_step)), total=num_step):
+            dx = 0
+            dy = 0
+
+            # generate height map
+            height_map, gel_map, contact_mask = sim.generateHeightMap(gelpad_model_path, press_depth, dx, dy)
+            # approximate the soft deformation
+            heightMap, contact_mask, contact_height = sim.deformApprox(press_depth, height_map, gel_map, contact_mask)
+            # simulate tactile images
+            sim_img, shadow_sim_img = sim.simulating(heightMap, contact_mask, contact_height, shadow=True)
+
+            if press_idx == 0:
+                sim_video = cv2.VideoWriter(
+                    osp.join('..', 'results', obj[:-4] + f'_sim_{press_min}_{press_max}.mp4'),
+                    cv2.VideoWriter_fourcc(*'mp4v'),
+                    5.,
+                    (sim_img.shape[1], sim_img.shape[0]))
+                shadow_sim_video = cv2.VideoWriter(
+                    osp.join('..', 'results', obj[:-4] + f'_shadow_{press_min}_{press_max}.mp4'),
+                    cv2.VideoWriter_fourcc(*'mp4v'),
+                    5.,
+                    (shadow_sim_img.shape[1], shadow_sim_img.shape[0]))
+            sim_video.write(cv2.cvtColor(np.astype(sim_img, np.uint8), cv2.COLOR_RGB2BGR))
+            shadow_sim_video.write(cv2.cvtColor(np.astype(shadow_sim_img, np.uint8), cv2.COLOR_RGB2BGR))
+
+            if press_idx == num_step - 1:
+                sim_video.release()
+                shadow_sim_video.release()
