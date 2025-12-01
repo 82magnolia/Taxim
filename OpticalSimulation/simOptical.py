@@ -16,12 +16,14 @@ import Basics.params as pr
 import Basics.sensorParams as psp
 from tqdm import tqdm
 import os
+import open3d as o3d
 
 parser = argparse.ArgumentParser()
 parser.add_argument("-obj", nargs='?', default='square',
                     help="Name of Object to be tested, supported_objects_list = [square, cylinder6]")
 parser.add_argument('-mode', default="single_press", type=str, help="Type of simulation to apply")
 parser.add_argument('-depth', default = 1.0, type=float, help='Indetation depth into the gelpad.')
+parser.add_argument('-obj_scale_factor', default = 1.0, type=float, help='Scale factor to multiply to object before simulation.')
 parser.add_argument('-depth_range_info', default = [0.1, 1.5, 100.], type=float, help='Indetation depth range information (min_depth, max_depth, num_range) into the gelpad.', nargs=3)
 parser.add_argument('-slide_range_info', default = [-1., 1., -1., 1., 100., 1.0], type=float, help='Sliding range information (min_x, max_x, min_y, max_y, num_range, press_depth) into the gelpad.', nargs=6)
 parser.add_argument('-rot_range_info', default = [0.3, 0.3, 0.3, 100., 1.0], type=float, help='Rotating range information (yaw_amplitude, pitch_amplitude, roll_amplitude, num_range, press_depth) into the gelpad.', nargs=5)
@@ -69,7 +71,7 @@ def rot_from_ypr(ypr_array):
 
 
 class simulator(object):
-    def __init__(self, data_folder, filePath, obj):
+    def __init__(self, data_folder, filePath, obj, obj_scale_factor=1.):
         """
         Initialize the simulator.
         1) load the object,
@@ -81,11 +83,9 @@ class simulator(object):
         objPath = osp.join(filePath,obj)
         self.obj_name = obj.split('.')[0]
         print("load object: " + self.obj_name)
-        f = open(objPath)
-        lines = f.readlines()
-        self.verts_num = int(lines[3].split(' ')[-1])
-        verts_lines = lines[10:10 + self.verts_num]
-        self.vertices = np.array([list(map(float, l.strip().split(' '))) for l in verts_lines])
+
+        pcd = o3d.io.read_point_cloud(objPath)
+        self.vertices = np.asarray(pcd.points) * obj_scale_factor
 
         # polytable
         calib_data = osp.join(data_folder, "polycalib.npz")
@@ -398,7 +398,7 @@ if __name__ == "__main__":
     obj = args.obj + '.ply'
 
     if args.mode == "single_press":
-        sim = simulator(data_folder, filePath, obj)
+        sim = simulator(data_folder, filePath, obj, args.obj_scale_factor)
         press_depth = args.depth
         dx = 0
         dy = 0
@@ -416,7 +416,7 @@ if __name__ == "__main__":
         cv2.imwrite(shadow_savePath, shadow_sim_img)
         np.save(height_savePath, heightMap)
     elif args.mode == "continuous_press":
-        sim = simulator(data_folder, filePath, obj)
+        sim = simulator(data_folder, filePath, obj, args.obj_scale_factor)
         press_min, press_max, num_step = args.depth_range_info
         num_step = int(num_step)
 
@@ -449,7 +449,7 @@ if __name__ == "__main__":
                 sim_video.release()
                 shadow_sim_video.release()
     elif args.mode == "rotating_press":
-        sim = simulator(data_folder, filePath, obj)
+        sim = simulator(data_folder, filePath, obj, args.obj_scale_factor)
         yaw_amplitude, pitch_amplitude, roll_amplitude, num_step, press_depth = args.rot_range_info
         num_step = int(num_step)
         yaw_arr = np.linspace(-yaw_amplitude, yaw_amplitude, num_step)
@@ -488,7 +488,7 @@ if __name__ == "__main__":
                 sim_video.release()
                 shadow_sim_video.release()
     elif args.mode == "sliding_press":
-        sim = simulator(data_folder, filePath, obj)
+        sim = simulator(data_folder, filePath, obj, args.obj_scale_factor)
         dx_min, dx_max, dy_min, dy_max, num_step, press_depth = args.slide_range_info
         num_step = int(num_step)
         slide_x = np.linspace(dx_min, dx_max, num_step)
