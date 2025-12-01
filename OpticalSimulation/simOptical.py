@@ -22,6 +22,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument("-obj", nargs='?', default='square',
                     help="Name of Object to be tested, supported_objects_list = [square, cylinder6]")
 parser.add_argument('-mode', default="single_press", type=str, help="Type of simulation to apply")
+parser.add_argument('-obj_path', default = None, type=str, help='Directory containing object point cloud')
 parser.add_argument('-depth', default = 1.0, type=float, help='Indetation depth into the gelpad.')
 parser.add_argument('-obj_scale_factor', default = 1.0, type=float, help='Scale factor to multiply to object before simulation.')
 parser.add_argument('-depth_range_info', default = [0.1, 1.5, 100.], type=float, help='Indetation depth range information (min_depth, max_depth, num_range) into the gelpad.', nargs=3)
@@ -393,7 +394,7 @@ class simulator(object):
 
 if __name__ == "__main__":
     data_folder = osp.join(osp.join( "..", "calibs"))
-    filePath = osp.join('..', 'data', 'objects')
+    filePath = osp.join('..', 'data', 'objects') if args.obj_path is None else args.obj_path
     gelpad_model_path = osp.join( '..', 'calibs', 'gelmap5.npy')
     obj = args.obj + '.ply'
 
