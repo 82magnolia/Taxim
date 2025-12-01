@@ -24,7 +24,49 @@ parser.add_argument('-mode', default="single_press", type=str, help="Type of sim
 parser.add_argument('-depth', default = 1.0, type=float, help='Indetation depth into the gelpad.')
 parser.add_argument('-depth_range_info', default = [0.1, 1.5, 100.], type=float, help='Indetation depth range information (min_depth, max_depth, num_range) into the gelpad.', nargs=3)
 parser.add_argument('-slide_range_info', default = [-1., 1., -1., 1., 100., 1.0], type=float, help='Sliding range information (min_x, max_x, min_y, max_y, num_range, press_depth) into the gelpad.', nargs=6)
+parser.add_argument('-rot_range_info', default = [0.3, 0.3, 0.3, 100., 1.0], type=float, help='Rotating range information (yaw_amplitude, pitch_amplitude, roll_amplitude, num_range, press_depth) into the gelpad.', nargs=5)
 args = parser.parse_args()
+
+
+def rot_from_ypr(ypr_array):
+    def _ypr2mtx(ypr):
+        # ypr is assumed to have a shape of [3, ]
+        yaw, pitch, roll = ypr
+        yaw = yaw.reshape(1)
+        pitch = pitch.reshape(1)
+        roll = roll.reshape(1)
+
+        tensor_0 = np.zeros(1, device=yaw.device)
+        tensor_1 = np.ones(1, device=yaw.device)
+
+        RX = np.stack([
+                        np.stack([tensor_1, tensor_0, tensor_0]),
+                        np.stack([tensor_0, np.cos(roll), -np.sin(roll)]),
+                        np.stack([tensor_0, np.sin(roll), np.cos(roll)])]).reshape(3, 3)
+
+        RY = np.stack([
+                        np.stack([np.cos(pitch), tensor_0, np.sin(pitch)]),
+                        np.stack([tensor_0, tensor_1, tensor_0]),
+                        np.stack([-np.sin(pitch), tensor_0, np.cos(pitch)])]).reshape(3, 3)
+
+        RZ = np.stack([
+                        np.stack([np.cos(yaw), -np.sin(yaw), tensor_0]),
+                        np.stack([np.sin(yaw), np.cos(yaw), tensor_0]),
+                        np.stack([tensor_0, tensor_0, tensor_1])]).reshape(3, 3)
+
+        R = RZ @ RY
+        R = R @ RX
+
+        return R
+
+    if len(ypr_array.shape) == 1:
+        return _ypr2mtx(ypr_array)
+    else:
+        tot_mtx = []
+        for ypr in ypr_array:
+            tot_mtx.append(_ypr2mtx(ypr))
+        return np.stack(tot_mtx)
+
 
 class simulator(object):
     def __init__(self, data_folder, filePath, obj):
@@ -222,7 +264,7 @@ class simulator(object):
         shadow_sim_img = cv2.GaussianBlur(shadow_sim_img.astype(np.float32),(pr.kernel_size,pr.kernel_size),0)
         return sim_img, shadow_sim_img
 
-    def generateHeightMap(self, gelpad_model_path, pressing_height_mm, dx, dy):
+    def generateHeightMap(self, gelpad_model_path, pressing_height_mm, dx, dy, contact_rot_mtx=None):
         """
         Generate the height map by interacting the object with the gelpad model.
         pressing_height_mm: pressing depth in millimeter
@@ -241,16 +283,30 @@ class simulator(object):
         # centralize the points
         cx = np.mean(self.vertices[:,0])
         cy = np.mean(self.vertices[:,1])
+
+        if contact_rot_mtx is not None:
+            # Select contact location along z-axis
+            xy_dist = np.linalg.norm(self.vertices[:, [0, 1]] - np.array([cx, cy]), axis=-1)
+            kth = min(100, xy_dist.shape[0] // 2)  # NOTE: This is an arbitrarily chosen number
+            topk_idx = np.argpartition(xy_dist, kth=kth)[:kth]
+            min_z = self.vertices[topk_idx, 2].min()
+
+            fixed_vertex = np.array([cx, cy, min_z])
+            sim_vertices = np.copy(self.vertices)
+            sim_vertices = (sim_vertices - fixed_vertex) @ contact_rot_mtx.T + fixed_vertex
+        else:
+            sim_vertices = np.copy(self.vertices)
+
         # add the shifting and change to the pix coordinate
-        uu = ((self.vertices[:,0] - cx)/psp.pixmm + psp.w//2+dx).astype(int)
-        vv = ((self.vertices[:,1] - cy)/psp.pixmm + psp.h//2+dy).astype(int)
+        uu = ((sim_vertices[:,0] - cx)/psp.pixmm + psp.w//2+dx).astype(int)
+        vv = ((sim_vertices[:,1] - cy)/psp.pixmm + psp.h//2+dy).astype(int)
         # check boundary of the image
         mask_u = np.logical_and(uu > 0, uu < psp.w)
         mask_v = np.logical_and(vv > 0, vv < psp.h)
         # check the depth
-        mask_z = self.vertices[:,2] > 0.2
+        mask_z = sim_vertices[:,2] > 0.2
         mask_map = mask_u & mask_v & mask_z
-        heightMap[vv[mask_map],uu[mask_map]] = self.vertices[mask_map][:,2]/psp.pixmm
+        heightMap[vv[mask_map],uu[mask_map]] = sim_vertices[mask_map][:,2]/psp.pixmm
 
         max_g = np.max(gel_map)
         min_g = np.min(gel_map)
@@ -383,6 +439,45 @@ if __name__ == "__main__":
                     (sim_img.shape[1], sim_img.shape[0]))
                 shadow_sim_video = cv2.VideoWriter(
                     osp.join('..', 'results', obj[:-4] + f'_shadow_{press_min}_{press_max}.mp4'),
+                    cv2.VideoWriter_fourcc(*'mp4v'),
+                    5.,
+                    (shadow_sim_img.shape[1], shadow_sim_img.shape[0]))
+            sim_video.write(cv2.cvtColor(np.astype(sim_img, np.uint8), cv2.COLOR_RGB2BGR))
+            shadow_sim_video.write(cv2.cvtColor(np.astype(shadow_sim_img, np.uint8), cv2.COLOR_RGB2BGR))
+
+            if press_idx == num_step - 1:
+                sim_video.release()
+                shadow_sim_video.release()
+    elif args.mode == "rotating_press":
+        sim = simulator(data_folder, filePath, obj)
+        yaw_amplitude, pitch_amplitude, roll_amplitude, num_step, press_depth = args.rot_range_info
+        num_step = int(num_step)
+        yaw_arr = np.linspace(-yaw_amplitude, yaw_amplitude, num_step)
+        pitch_arr = np.linspace(-pitch_amplitude, pitch_amplitude, num_step)
+        roll_arr = np.linspace(-roll_amplitude, roll_amplitude, num_step)
+        ypr_arr = np.stack([yaw_arr, pitch_arr, roll_arr], axis=-1)
+
+        rot_arr = rot_from_ypr(ypr_arr)
+
+        for press_idx, rot_mtx in tqdm(enumerate(rot_arr), total=num_step):
+            dx = 0
+            dy = 0
+
+            # generate height map
+            height_map, gel_map, contact_mask = sim.generateHeightMap(gelpad_model_path, press_depth, dx, dy, rot_mtx)
+            # approximate the soft deformation
+            heightMap, contact_mask, contact_height = sim.deformApprox(press_depth, height_map, gel_map, contact_mask)
+            # simulate tactile images
+            sim_img, shadow_sim_img = sim.simulating(heightMap, contact_mask, contact_height, shadow=True)
+
+            if press_idx == 0:
+                sim_video = cv2.VideoWriter(
+                    osp.join('..', 'results', obj[:-4] + f'_sim_rot_{yaw_amplitude}_{pitch_amplitude}_{roll_amplitude}.mp4'),
+                    cv2.VideoWriter_fourcc(*'mp4v'),
+                    5.,
+                    (sim_img.shape[1], sim_img.shape[0]))
+                shadow_sim_video = cv2.VideoWriter(
+                    osp.join('..', 'results', obj[:-4] + f'_shadow_rot_{yaw_amplitude}_{pitch_amplitude}_{roll_amplitude}.mp4'),
                     cv2.VideoWriter_fourcc(*'mp4v'),
                     5.,
                     (shadow_sim_img.shape[1], shadow_sim_img.shape[0]))
