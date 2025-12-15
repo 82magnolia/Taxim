@@ -88,6 +88,14 @@ class simulator(object):
         pcd = o3d.io.read_point_cloud(objPath)
         self.vertices = np.asarray(pcd.points) * obj_scale_factor
 
+        # Paint with uniform color if no colors exist
+        if len(pcd.colors) == 0:
+            pcd = pcd.paint_uniform_color([0.5, 0.5, 0.5])
+        self.colors = np.asarray(pcd.colors)
+
+        pcd.estimate_normals()
+        self.vert_normals = np.asarray(pcd.normals)
+
         # polytable
         calib_data = osp.join(data_folder, "polycalib.npz")
         self.calib_data = CalibData(calib_data)
@@ -275,11 +283,18 @@ class simulator(object):
         gel_map: gelpad height map
         contact_mask: indicate contact area
         """
+        # NOTE 1: Tactile sensor is placed at the x,y location of object center with z location at maximum object height, and object points with height over a threshold (0.2) are all considered
+        # NOTE 2: Tactile sensor is placed oppositely facing the object placed on top of a virtual plane with z=0, although the object can be "floating".
+        # NOTE 3: Currently normals are stored in "raw" xyz coordinates. To handle arbitrary tangent planes, a tangent frame (and its accompanying rotation matrix) should be considered: https://github.com/nmwsharp/potpourri3d
         assert(self.vertices.shape[1] == 3)
         # load dome-shape gelpad model
         gel_map = np.load(gelpad_model_path)
         gel_map = cv2.GaussianBlur(gel_map.astype(np.float32),(pr.kernel_size,pr.kernel_size),0)
         heightMap = np.zeros((psp.h,psp.w))
+
+        # Raw color and normal maps
+        rawcolorMap = np.zeros((psp.h,psp.w,3))
+        rawnormalMap = np.zeros((psp.h,psp.w,3))
 
         # centralize the points
         cx = np.mean(self.vertices[:,0])
@@ -290,13 +305,15 @@ class simulator(object):
             xy_dist = np.linalg.norm(self.vertices[:, [0, 1]] - np.array([cx, cy]), axis=-1)
             kth = min(100, xy_dist.shape[0] // 2)  # NOTE: This is an arbitrarily chosen number
             topk_idx = np.argpartition(xy_dist, kth=kth)[:kth]
-            min_z = self.vertices[topk_idx, 2].min()
+            max_z = self.vertices[topk_idx, 2].max()
 
-            fixed_vertex = np.array([cx, cy, min_z])
+            fixed_vertex = np.array([cx, cy, max_z])
             sim_vertices = np.copy(self.vertices)
             sim_vertices = (sim_vertices - fixed_vertex) @ contact_rot_mtx.T + fixed_vertex
+            sim_vert_normals = self.vert_normals @ contact_rot_mtx.T
         else:
             sim_vertices = np.copy(self.vertices)
+            sim_vert_normals = np.copy(self.vert_normals)
 
         # add the shifting and change to the pix coordinate
         uu = ((sim_vertices[:,0] - cx)/psp.pixmm + psp.w//2+dx).astype(int)
@@ -309,6 +326,15 @@ class simulator(object):
         mask_map = mask_u & mask_v & mask_z
         heightMap[vv[mask_map],uu[mask_map]] = sim_vertices[mask_map][:,2]/psp.pixmm
 
+        # Fill in raw color and normals
+        rawcolorMap[vv[mask_map],uu[mask_map]] = self.colors[mask_map]
+        rawnormalMap[vv[mask_map],uu[mask_map]] = sim_vert_normals[mask_map]
+
+        # Normal map for visualization
+        vis_rawnormalMap = np.copy(rawnormalMap)
+        vis_rawnormalMap[vv[mask_map],uu[mask_map]] = (rawnormalMap[vv[mask_map],uu[mask_map]] + 1.0) * 0.5
+        vis_rawnormalMap = np.clip(vis_rawnormalMap, 0, 1)
+
         max_g = np.max(gel_map)
         min_g = np.min(gel_map)
         max_o = np.max(heightMap)
@@ -316,7 +342,7 @@ class simulator(object):
         pressing_height_pix = pressing_height_mm/psp.pixmm
 
         # shift the gelpad to interact with the object
-        gel_map = -1 * gel_map + (max_g+max_o-pressing_height_pix)
+        gel_map = -1 * gel_map + (max_g+max_o-pressing_height_pix)  # RHS is gel height map assuming object placed at z = 0
 
         # get the contact area
         contact_mask = heightMap > gel_map
@@ -326,7 +352,8 @@ class simulator(object):
 
         zq[contact_mask]  = heightMap[contact_mask]
         zq[~contact_mask] = gel_map[~contact_mask]
-        return zq, gel_map, contact_mask
+
+        return zq, gel_map, contact_mask, rawcolorMap, rawnormalMap, vis_rawnormalMap
 
     def deformApprox(self, pressing_height_mm, height_map, gel_map, contact_mask):
         zq = height_map.copy()
@@ -405,7 +432,7 @@ if __name__ == "__main__":
         dy = 0
 
         # generate height map
-        height_map, gel_map, contact_mask = sim.generateHeightMap(gelpad_model_path, press_depth, dx, dy)
+        height_map, gel_map, contact_mask, raw_color_map, raw_normal_map, vis_raw_normal_map = sim.generateHeightMap(gelpad_model_path, press_depth, dx, dy)
         # approximate the soft deformation
         heightMap, contact_mask, contact_height = sim.deformApprox(press_depth, height_map, gel_map, contact_mask)
         # simulate tactile images
@@ -413,9 +440,18 @@ if __name__ == "__main__":
         img_savePath = osp.join('..', 'results', obj[:-4]+'_sim.jpg')
         shadow_savePath = osp.join('..', 'results', obj[:-4]+'_shadow.jpg')
         height_savePath = osp.join('..', 'results', obj[:-4]+'_height.npy')
+
+        raw_color_savePath = osp.join('..', 'results', obj[:-4]+'_raw_color.jpg')
+        raw_normal_savePath = osp.join('..', 'results', obj[:-4]+'_raw_normal.jpg')
+        raw_color_img = np.astype(raw_color_map * 255, np.uint8)
+        raw_normal_img = np.astype(vis_raw_normal_map * 255, np.uint8)
+
         cv2.imwrite(img_savePath, sim_img)
         cv2.imwrite(shadow_savePath, shadow_sim_img)
         np.save(height_savePath, heightMap)
+
+        cv2.imwrite(raw_color_savePath, cv2.cvtColor(raw_color_img, cv2.COLOR_BGR2RGB))
+        cv2.imwrite(raw_normal_savePath, cv2.cvtColor(raw_normal_img, cv2.COLOR_BGR2RGB))
     elif args.mode == "continuous_press":
         sim = simulator(data_folder, filePath, obj, args.obj_scale_factor)
         press_min, press_max, num_step = args.depth_range_info
@@ -426,7 +462,7 @@ if __name__ == "__main__":
             dy = 0
 
             # generate height map
-            height_map, gel_map, contact_mask = sim.generateHeightMap(gelpad_model_path, press_depth, dx, dy)
+            height_map, gel_map, contact_mask, raw_color_map, raw_normal_map, vis_raw_normal_map = sim.generateHeightMap(gelpad_model_path, press_depth, dx, dy)
             # approximate the soft deformation
             heightMap, contact_mask, contact_height = sim.deformApprox(press_depth, height_map, gel_map, contact_mask)
             # simulate tactile images
@@ -443,8 +479,24 @@ if __name__ == "__main__":
                     cv2.VideoWriter_fourcc(*'mp4v'),
                     5.,
                     (shadow_sim_img.shape[1], shadow_sim_img.shape[0]))
+                raw_color_video = cv2.VideoWriter(
+                    osp.join('..', 'results', obj[:-4] + f'_raw_color_{press_min}_{press_max}.mp4'),
+                    cv2.VideoWriter_fourcc(*'mp4v'),
+                    5.,
+                    (raw_color_map.shape[1], raw_color_map.shape[0]))
+                raw_normal_video = cv2.VideoWriter(
+                    osp.join('..', 'results', obj[:-4] + f'_raw_normal_{press_min}_{press_max}.mp4'),
+                    cv2.VideoWriter_fourcc(*'mp4v'),
+                    5.,
+                    (vis_raw_normal_map.shape[1], vis_raw_normal_map.shape[0]))
+
             sim_video.write(cv2.cvtColor(np.astype(sim_img, np.uint8), cv2.COLOR_RGB2BGR))
             shadow_sim_video.write(cv2.cvtColor(np.astype(shadow_sim_img, np.uint8), cv2.COLOR_RGB2BGR))
+
+            raw_color_img = np.astype(raw_color_map * 255, np.uint8)
+            raw_normal_img = np.astype(vis_raw_normal_map * 255, np.uint8)
+            raw_color_video.write(cv2.cvtColor(raw_color_img, cv2.COLOR_RGB2BGR))
+            raw_normal_video.write(cv2.cvtColor(raw_normal_img, cv2.COLOR_RGB2BGR))
 
             if press_idx == num_step - 1:
                 sim_video.release()
@@ -465,7 +517,7 @@ if __name__ == "__main__":
             dy = 0
 
             # generate height map
-            height_map, gel_map, contact_mask = sim.generateHeightMap(gelpad_model_path, press_depth, dx, dy, rot_mtx)
+            height_map, gel_map, contact_mask, raw_color_map, raw_normal_map, vis_raw_normal_map = sim.generateHeightMap(gelpad_model_path, press_depth, dx, dy, rot_mtx)
             # approximate the soft deformation
             heightMap, contact_mask, contact_height = sim.deformApprox(press_depth, height_map, gel_map, contact_mask)
             # simulate tactile images
@@ -482,8 +534,24 @@ if __name__ == "__main__":
                     cv2.VideoWriter_fourcc(*'mp4v'),
                     5.,
                     (shadow_sim_img.shape[1], shadow_sim_img.shape[0]))
+                raw_color_video = cv2.VideoWriter(
+                    osp.join('..', 'results', obj[:-4] + f'_raw_color_rot_{yaw_amplitude}_{pitch_amplitude}_{roll_amplitude}.mp4'),
+                    cv2.VideoWriter_fourcc(*'mp4v'),
+                    5.,
+                    (raw_color_map.shape[1], raw_color_map.shape[0]))
+                raw_normal_video = cv2.VideoWriter(
+                    osp.join('..', 'results', obj[:-4] + f'_raw_normal_rot_{yaw_amplitude}_{pitch_amplitude}_{roll_amplitude}.mp4'),
+                    cv2.VideoWriter_fourcc(*'mp4v'),
+                    5.,
+                    (vis_raw_normal_map.shape[1], vis_raw_normal_map.shape[0]))
+
             sim_video.write(cv2.cvtColor(np.astype(sim_img, np.uint8), cv2.COLOR_RGB2BGR))
             shadow_sim_video.write(cv2.cvtColor(np.astype(shadow_sim_img, np.uint8), cv2.COLOR_RGB2BGR))
+
+            raw_color_img = np.astype(raw_color_map * 255, np.uint8)
+            raw_normal_img = np.astype(vis_raw_normal_map * 255, np.uint8)
+            raw_color_video.write(cv2.cvtColor(raw_color_img, cv2.COLOR_RGB2BGR))
+            raw_normal_video.write(cv2.cvtColor(raw_normal_img, cv2.COLOR_RGB2BGR))
 
             if press_idx == num_step - 1:
                 sim_video.release()
@@ -498,7 +566,7 @@ if __name__ == "__main__":
         for press_idx, (dx, dy) in tqdm(enumerate(zip(slide_x, slide_y)), total=num_step):
 
             # generate height map
-            height_map, gel_map, contact_mask = sim.generateHeightMap(gelpad_model_path, press_depth, dx, dy)
+            height_map, gel_map, contact_mask, raw_color_map, raw_normal_map, vis_raw_normal_map = sim.generateHeightMap(gelpad_model_path, press_depth, dx, dy)
             # approximate the soft deformation
             heightMap, contact_mask, contact_height = sim.deformApprox(press_depth, height_map, gel_map, contact_mask)
             # simulate tactile images
@@ -515,8 +583,24 @@ if __name__ == "__main__":
                     cv2.VideoWriter_fourcc(*'mp4v'),
                     5.,
                     (shadow_sim_img.shape[1], shadow_sim_img.shape[0]))
+                raw_color_video = cv2.VideoWriter(
+                    osp.join('..', 'results', obj[:-4] + f'_raw_color_slide_{dx_min}_{dx_max}_{dy_min}_{dy_max}.mp4'),
+                    cv2.VideoWriter_fourcc(*'mp4v'),
+                    5.,
+                    (raw_color_map.shape[1], raw_color_map.shape[0]))
+                raw_normal_video = cv2.VideoWriter(
+                    osp.join('..', 'results', obj[:-4] + f'_raw_normal_slide_{dx_min}_{dx_max}_{dy_min}_{dy_max}.mp4'),
+                    cv2.VideoWriter_fourcc(*'mp4v'),
+                    5.,
+                    (vis_raw_normal_map.shape[1], vis_raw_normal_map.shape[0]))
+
             sim_video.write(cv2.cvtColor(np.astype(sim_img, np.uint8), cv2.COLOR_RGB2BGR))
             shadow_sim_video.write(cv2.cvtColor(np.astype(shadow_sim_img, np.uint8), cv2.COLOR_RGB2BGR))
+
+            raw_color_img = np.astype(raw_color_map * 255, np.uint8)
+            raw_normal_img = np.astype(vis_raw_normal_map * 255, np.uint8)
+            raw_color_video.write(cv2.cvtColor(raw_color_img, cv2.COLOR_RGB2BGR))
+            raw_normal_video.write(cv2.cvtColor(raw_normal_img, cv2.COLOR_RGB2BGR))
 
             if press_idx == num_step - 1:
                 sim_video.release()
