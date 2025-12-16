@@ -17,6 +17,8 @@ import Basics.sensorParams as psp
 from tqdm import tqdm
 import os
 import open3d as o3d
+import warnings
+from matplotlib import colormaps
 
 parser = argparse.ArgumentParser()
 parser.add_argument("-obj", nargs='?', default='square',
@@ -28,6 +30,8 @@ parser.add_argument('-obj_scale_factor', default = 1.0, type=float, help='Scale 
 parser.add_argument('-depth_range_info', default = [0.1, 1.5, 100.], type=float, help='Indetation depth range information (min_depth, max_depth, num_range) into the gelpad.', nargs=3)
 parser.add_argument('-slide_range_info', default = [-1., 1., -1., 1., 100., 1.0], type=float, help='Sliding range information (min_x, max_x, min_y, max_y, num_range, press_depth) into the gelpad.', nargs=6)
 parser.add_argument('-rot_range_info', default = [0.3, 0.3, 0.3, 100., 1.0], type=float, help='Rotating range information (yaw_amplitude, pitch_amplitude, roll_amplitude, num_range, press_depth) into the gelpad.', nargs=5)
+parser.add_argument('-contact_point', default = None, type=float, help='Contact point location', nargs=3)
+parser.add_argument('-contact_theta', default = None, type=float, help='Contact point rotation angle')
 args = parser.parse_args()
 
 
@@ -71,6 +75,58 @@ def rot_from_ypr(ypr_array):
         return np.stack(tot_mtx)
 
 
+def skew(v):
+    return np.array([
+        [0, -v[2], v[1]],
+        [v[2], 0, -v[0]],
+        [-v[1], v[0], 0]
+    ])
+
+
+def rotation_from_axis_angle(axis, angle):
+    axis = axis / np.linalg.norm(axis)
+    K = skew(axis)
+    I = np.eye(3)
+    return I + np.sin(angle) * K + (1 - np.cos(angle)) * (K @ K)
+
+
+def align_normals(n1, n2):
+    n1 = n1 / np.linalg.norm(n1)
+    n2 = n2 / np.linalg.norm(n2)
+
+    v = np.cross(n1, n2)
+    c = np.dot(n1, n2)
+
+    if np.linalg.norm(v) < 1e-8:
+        # n1 and n2 are parallel or antiparallel
+        if c > 0:
+            return np.eye(3)
+        else:
+            # 180-degree rotation around any axis orthogonal to n1
+            a = np.array([1.0, 0.0, 0.0])
+            if abs(np.dot(a, n1)) > 0.9:
+                a = np.array([0.0, 1.0, 0.0])
+            axis = np.cross(n1, a)
+            axis /= np.linalg.norm(axis)
+            return rotation_from_axis_angle(axis, np.pi)
+
+    axis = v / np.linalg.norm(v)
+    angle = np.arccos(np.clip(c, -1.0, 1.0))
+    return rotation_from_axis_angle(axis, angle)
+
+
+def rotation_family(n1, n2, theta):
+    """
+    Returns a rotation R(theta) such that R(theta) @ n1 = n2
+    """
+    n1 = n1 / np.linalg.norm(n1)
+
+    R0 = align_normals(n1, n2)
+    R_spin = rotation_from_axis_angle(n1, theta)
+
+    return R0 @ R_spin
+
+
 class simulator(object):
     def __init__(self, data_folder, filePath, obj, obj_scale_factor=1.):
         """
@@ -93,7 +149,9 @@ class simulator(object):
             pcd = pcd.paint_uniform_color([0.5, 0.5, 0.5])
         self.colors = np.asarray(pcd.colors)
 
-        pcd.estimate_normals()
+        if len(pcd.normals) == 0:  # Esimate normals if none exist
+            warnings.warn("No normals exist, resorting to Open3D normal estimation which is noisy")
+            pcd.estimate_normals()
         self.vert_normals = np.asarray(pcd.normals)
 
         # polytable
@@ -273,7 +331,7 @@ class simulator(object):
         shadow_sim_img = cv2.GaussianBlur(shadow_sim_img.astype(np.float32),(pr.kernel_size,pr.kernel_size),0)
         return sim_img, shadow_sim_img
 
-    def generateHeightMap(self, gelpad_model_path, pressing_height_mm, dx, dy, contact_rot_mtx=None):
+    def generateHeightMap(self, gelpad_model_path, pressing_height_mm, dx, dy, contact_jitter_rot_mtx=None, contact_point=None, contact_theta=0.):
         """
         Generate the height map by interacting the object with the gelpad model.
         pressing_height_mm: pressing depth in millimeter
@@ -284,8 +342,11 @@ class simulator(object):
         contact_mask: indicate contact area
         """
         # NOTE 1: Tactile sensor is placed at the x,y location of object center with z location at maximum object height, and object points with height over a threshold (0.2) are all considered
-        # NOTE 2: Tactile sensor is placed oppositely facing the object placed on top of a virtual plane with z=0, although the object can be "floating".
-        # NOTE 3: Currently normals are stored in "raw" xyz coordinates. To handle arbitrary tangent planes, a tangent frame (and its accompanying rotation matrix) should be considered: https://github.com/nmwsharp/potpourri3d
+        # NOTE 2: Tactile sensor is placed oppositely facing the object placed on top of a virtual plane with z=0, although the object can be "floating"
+        # NOTE 3: Currently normals are stored in "raw" xyz coordinates. To transform between two normals, we represent rotation as a 1-parameter family of transformations, controlled by contact_theta.
+        # NOTE 4: This contact_theta controls the variation in contact rotations, or "rolling" on the contact point's tangent plane
+        # NOTE 5: contact_jitter_rot_mtx additionally applies rotation to a contact point location to enable rotation other than tangent plane rolling
+
         assert(self.vertices.shape[1] == 3)
         # load dome-shape gelpad model
         gel_map = np.load(gelpad_model_path)
@@ -296,24 +357,53 @@ class simulator(object):
         rawcolorMap = np.zeros((psp.h,psp.w,3))
         rawnormalMap = np.zeros((psp.h,psp.w,3))
 
-        # centralize the points
-        cx = np.mean(self.vertices[:,0])
-        cy = np.mean(self.vertices[:,1])
+        # Identify original contact points
+        orig_cx = np.mean(self.vertices[:,0])
+        orig_cy = np.mean(self.vertices[:,1])
+        xy_dist = np.linalg.norm(self.vertices[:, [0, 1]] - np.array([orig_cx, orig_cy]), axis=-1)
+        kth = min(100, xy_dist.shape[0] // 2)  # NOTE: This is an arbitrarily chosen number
+        topk_idx = np.argpartition(xy_dist, kth=kth)[:kth]
+        orig_cz = self.vertices[topk_idx, 2].max()
 
-        if contact_rot_mtx is not None:
-            # Select contact location along z-axis
-            xy_dist = np.linalg.norm(self.vertices[:, [0, 1]] - np.array([cx, cy]), axis=-1)
-            kth = min(100, xy_dist.shape[0] // 2)  # NOTE: This is an arbitrarily chosen number
-            topk_idx = np.argpartition(xy_dist, kth=kth)[:kth]
-            max_z = self.vertices[topk_idx, 2].max()
+        # Original concact point and normal direction
+        orig_contact = np.array([orig_cx, orig_cy, orig_cz])
+        orig_normal = self.vert_normals[np.linalg.norm(self.vertices - orig_contact, axis=-1).argmin()]
 
-            fixed_vertex = np.array([cx, cy, max_z])
-            sim_vertices = np.copy(self.vertices)
-            sim_vertices = (sim_vertices - fixed_vertex) @ contact_rot_mtx.T + fixed_vertex
-            sim_vert_normals = self.vert_normals @ contact_rot_mtx.T
+        # Copy original vertex set and normals
+        sim_vertices = np.copy(self.vertices)
+        sim_vert_normals = np.copy(self.vert_normals)
+
+        # Set contact points given as array of shape (3, )
+        if contact_point is not None:
+            cx = contact_point[0]
+            cy = contact_point[1]
+            cz = contact_point[2]
+
+            # New contact point and normal direction
+            new_contact = np.array([cx, cy, cz])
+            new_normal = sim_vert_normals[np.linalg.norm(self.vertices - new_contact, axis=-1).argmin()]
+
+            # Estimate rotation matrix that aligns new normal to the positive z direction
+            contact_rot_mtx = rotation_family(new_normal, np.array([0, 0, 1]), contact_theta)
+
+            # Fix contact point and rotate points
+            sim_vertices = (sim_vertices - new_contact) @ contact_rot_mtx.T + new_contact
+            sim_vert_normals = sim_vert_normals @ contact_rot_mtx.T
         else:
-            sim_vertices = np.copy(self.vertices)
-            sim_vert_normals = np.copy(self.vert_normals)
+            cx = orig_cx
+            cy = orig_cy
+            cz = orig_cz
+
+        # Ensure minimum height is 0.
+        sim_vertices[:, 2] -= sim_vertices[:, 2].min()
+        cz = 0.
+
+        if contact_jitter_rot_mtx is not None:
+            fixed_vertex = np.array([cx, cy, cz])
+            sim_vertices = (sim_vertices - fixed_vertex) @ contact_jitter_rot_mtx.T + fixed_vertex
+            sim_vert_normals = sim_vert_normals @ contact_jitter_rot_mtx.T
+        else:
+            sim_vert_normals = np.copy(sim_vert_normals)
 
         # add the shifting and change to the pix coordinate
         uu = ((sim_vertices[:,0] - cx)/psp.pixmm + psp.w//2+dx).astype(int)
@@ -322,7 +412,7 @@ class simulator(object):
         mask_u = np.logical_and(uu > 0, uu < psp.w)
         mask_v = np.logical_and(vv > 0, vv < psp.h)
         # check the depth
-        mask_z = sim_vertices[:,2] > 0.2
+        mask_z = sim_vertices[:,2] > 0.2  # Filter points whose z value is below 0.2 (manual threshold)
         mask_map = mask_u & mask_v & mask_z
         heightMap[vv[mask_map],uu[mask_map]] = sim_vertices[mask_map][:,2]/psp.pixmm
 
@@ -353,7 +443,7 @@ class simulator(object):
         zq[contact_mask]  = heightMap[contact_mask]
         zq[~contact_mask] = gel_map[~contact_mask]
 
-        return zq, gel_map, contact_mask, rawcolorMap, rawnormalMap, vis_rawnormalMap
+        return zq, gel_map, contact_mask, rawcolorMap, rawnormalMap, vis_rawnormalMap, heightMap
 
     def deformApprox(self, pressing_height_mm, height_map, gel_map, contact_mask):
         zq = height_map.copy()
@@ -425,6 +515,11 @@ if __name__ == "__main__":
     gelpad_model_path = osp.join( '..', 'calibs', 'gelmap5.npy')
     obj = args.obj + '.ply'
 
+    if args.contact_point is None:
+        contact_point = None
+    else:
+        contact_point = np.array([args.contact_point[0], args.contact_point[1], args.contact_point[2]])
+
     if args.mode == "single_press":
         sim = simulator(data_folder, filePath, obj, args.obj_scale_factor)
         press_depth = args.depth
@@ -432,14 +527,14 @@ if __name__ == "__main__":
         dy = 0
 
         # generate height map
-        height_map, gel_map, contact_mask, raw_color_map, raw_normal_map, vis_raw_normal_map = sim.generateHeightMap(gelpad_model_path, press_depth, dx, dy)
+        height_map, gel_map, contact_mask, raw_color_map, raw_normal_map, vis_raw_normal_map, raw_height_map = sim.generateHeightMap(gelpad_model_path, press_depth, dx, dy, contact_point=contact_point, contact_theta=args.contact_theta)
         # approximate the soft deformation
         heightMap, contact_mask, contact_height = sim.deformApprox(press_depth, height_map, gel_map, contact_mask)
         # simulate tactile images
         sim_img, shadow_sim_img = sim.simulating(heightMap, contact_mask, contact_height, shadow=True)
         img_savePath = osp.join('..', 'results', obj[:-4]+'_sim.jpg')
         shadow_savePath = osp.join('..', 'results', obj[:-4]+'_shadow.jpg')
-        height_savePath = osp.join('..', 'results', obj[:-4]+'_height.npy')
+        height_savePath = osp.join('..', 'results', obj[:-4]+'_raw_height.jpg')
 
         raw_color_savePath = osp.join('..', 'results', obj[:-4]+'_raw_color.jpg')
         raw_normal_savePath = osp.join('..', 'results', obj[:-4]+'_raw_normal.jpg')
@@ -448,10 +543,13 @@ if __name__ == "__main__":
 
         cv2.imwrite(img_savePath, sim_img)
         cv2.imwrite(shadow_savePath, shadow_sim_img)
-        np.save(height_savePath, heightMap)
 
-        cv2.imwrite(raw_color_savePath, cv2.cvtColor(raw_color_img, cv2.COLOR_BGR2RGB))
-        cv2.imwrite(raw_normal_savePath, cv2.cvtColor(raw_normal_img, cv2.COLOR_BGR2RGB))
+        norm_raw_height_map = colormaps.get_cmap("viridis")((raw_height_map - raw_height_map.min()) / (raw_height_map.max() - raw_height_map.min() + 1e-6))
+        norm_raw_height_map = np.astype(norm_raw_height_map * 255, np.uint8)
+        cv2.imwrite(height_savePath, cv2.cvtColor(norm_raw_height_map, cv2.COLOR_RGB2BGR))
+
+        cv2.imwrite(raw_color_savePath, cv2.cvtColor(raw_color_img, cv2.COLOR_RGB2BGR))
+        cv2.imwrite(raw_normal_savePath, cv2.cvtColor(raw_normal_img, cv2.COLOR_RGB2BGR))
     elif args.mode == "continuous_press":
         sim = simulator(data_folder, filePath, obj, args.obj_scale_factor)
         press_min, press_max, num_step = args.depth_range_info
@@ -462,7 +560,7 @@ if __name__ == "__main__":
             dy = 0
 
             # generate height map
-            height_map, gel_map, contact_mask, raw_color_map, raw_normal_map, vis_raw_normal_map = sim.generateHeightMap(gelpad_model_path, press_depth, dx, dy)
+            height_map, gel_map, contact_mask, raw_color_map, raw_normal_map, vis_raw_normal_map, raw_height_map = sim.generateHeightMap(gelpad_model_path, press_depth, dx, dy, contact_point=contact_point, contact_theta=args.contact_theta)
             # approximate the soft deformation
             heightMap, contact_mask, contact_height = sim.deformApprox(press_depth, height_map, gel_map, contact_mask)
             # simulate tactile images
@@ -517,7 +615,7 @@ if __name__ == "__main__":
             dy = 0
 
             # generate height map
-            height_map, gel_map, contact_mask, raw_color_map, raw_normal_map, vis_raw_normal_map = sim.generateHeightMap(gelpad_model_path, press_depth, dx, dy, rot_mtx)
+            height_map, gel_map, contact_mask, raw_color_map, raw_normal_map, vis_raw_normal_map, raw_height_map = sim.generateHeightMap(gelpad_model_path, press_depth, dx, dy, rot_mtx, contact_point=contact_point, contact_theta=args.contact_theta)
             # approximate the soft deformation
             heightMap, contact_mask, contact_height = sim.deformApprox(press_depth, height_map, gel_map, contact_mask)
             # simulate tactile images
@@ -566,7 +664,7 @@ if __name__ == "__main__":
         for press_idx, (dx, dy) in tqdm(enumerate(zip(slide_x, slide_y)), total=num_step):
 
             # generate height map
-            height_map, gel_map, contact_mask, raw_color_map, raw_normal_map, vis_raw_normal_map = sim.generateHeightMap(gelpad_model_path, press_depth, dx, dy)
+            height_map, gel_map, contact_mask, raw_color_map, raw_normal_map, vis_raw_normal_map, raw_height_map = sim.generateHeightMap(gelpad_model_path, press_depth, dx, dy, contact_point=contact_point, contact_theta=args.contact_theta)
             # approximate the soft deformation
             heightMap, contact_mask, contact_height = sim.deformApprox(press_depth, height_map, gel_map, contact_mask)
             # simulate tactile images
