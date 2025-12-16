@@ -509,6 +509,166 @@ class simulator(object):
         """ pad one row & one col on each side """
         return np.pad(img, ((1, 1), (1, 1)), 'symmetric')
 
+
+# TODO: Finish implementing this
+class mesh_simulator(simulator):
+    def __init__(self, data_folder, filePath, obj, obj_scale_factor=1.):
+        """
+        Initialize the simulator.
+        1) load the object,
+        2) load the calibration files,
+        3) generate shadow table from shadow masks
+        """
+        # read in object's ply file
+        # object facing positive direction of z axis
+        objPath = osp.join(filePath,obj)
+        self.obj_name = obj.split('.')[0]
+        print("load object: " + self.obj_name)
+
+        pcd = o3d.io.read_(objPath)
+        self.vertices = np.asarray(pcd.points) * obj_scale_factor
+
+        # Paint with uniform color if no colors exist
+        if len(pcd.colors) == 0:
+            pcd = pcd.paint_uniform_color([0.5, 0.5, 0.5])
+        self.colors = np.asarray(pcd.colors)
+
+        if len(pcd.normals) == 0:  # Esimate normals if none exist
+            warnings.warn("No normals exist, resorting to Open3D normal estimation which is noisy")
+            pcd.estimate_normals()
+        self.vert_normals = np.asarray(pcd.normals)
+
+        # polytable
+        calib_data = osp.join(data_folder, "polycalib.npz")
+        self.calib_data = CalibData(calib_data)
+
+        # raw calibration data
+        rawData = osp.join(data_folder, "dataPack.npz")
+        data_file = np.load(rawData,allow_pickle=True)
+        self.f0 = data_file['f0']
+        self.bg_proc = self.processInitialFrame()
+
+        #shadow calibration
+        self.shadow_depth = [0.4,0.5,0.6,0.7,0.8,0.9,1.0,1.1,1.2]
+        shadowData = np.load(osp.join(data_folder, "shadowTable.npz"),allow_pickle=True)
+        self.direction = shadowData['shadowDirections']
+        self.shadowTable = shadowData['shadowTable']
+
+    def generateHeightMap(self, gelpad_model_path, pressing_height_mm, dx, dy, contact_jitter_rot_mtx=None, contact_point=None, contact_theta=0.):
+        """
+        Generate the height map by interacting the object with the gelpad model.
+        pressing_height_mm: pressing depth in millimeter
+        dx, dy: shift of the object
+        return:
+        zq: the interacted height map
+        gel_map: gelpad height map
+        contact_mask: indicate contact area
+        """
+        # NOTE 1: Tactile sensor is placed at the x,y location of object center with z location at maximum object height, and object points with height over a threshold (0.2) are all considered
+        # NOTE 2: Tactile sensor is placed oppositely facing the object placed on top of a virtual plane with z=0, although the object can be "floating"
+        # NOTE 3: Currently normals are stored in "raw" xyz coordinates. To transform between two normals, we represent rotation as a 1-parameter family of transformations, controlled by contact_theta.
+        # NOTE 4: This contact_theta controls the variation in contact rotations, or "rolling" on the contact point's tangent plane
+        # NOTE 5: contact_jitter_rot_mtx additionally applies rotation to a contact point location to enable rotation other than tangent plane rolling
+
+        assert(self.vertices.shape[1] == 3)
+        # load dome-shape gelpad model
+        gel_map = np.load(gelpad_model_path)
+        gel_map = cv2.GaussianBlur(gel_map.astype(np.float32),(pr.kernel_size,pr.kernel_size),0)
+        heightMap = np.zeros((psp.h,psp.w))
+
+        # Raw color and normal maps
+        rawcolorMap = np.zeros((psp.h,psp.w,3))
+        rawnormalMap = np.zeros((psp.h,psp.w,3))
+
+        # Identify original contact points
+        orig_cx = np.mean(self.vertices[:,0])
+        orig_cy = np.mean(self.vertices[:,1])
+        xy_dist = np.linalg.norm(self.vertices[:, [0, 1]] - np.array([orig_cx, orig_cy]), axis=-1)
+        kth = min(100, xy_dist.shape[0] // 2)  # NOTE: This is an arbitrarily chosen number
+        topk_idx = np.argpartition(xy_dist, kth=kth)[:kth]
+        orig_cz = self.vertices[topk_idx, 2].max()
+
+        # Original concact point and normal direction
+        orig_contact = np.array([orig_cx, orig_cy, orig_cz])
+        orig_normal = self.vert_normals[np.linalg.norm(self.vertices - orig_contact, axis=-1).argmin()]
+
+        # Copy original vertex set and normals
+        sim_vertices = np.copy(self.vertices)
+        sim_vert_normals = np.copy(self.vert_normals)
+
+        # Set contact points given as array of shape (3, )
+        if contact_point is not None:
+            cx = contact_point[0]
+            cy = contact_point[1]
+            cz = contact_point[2]
+
+            # New contact point and normal direction
+            new_contact = np.array([cx, cy, cz])
+            new_normal = sim_vert_normals[np.linalg.norm(self.vertices - new_contact, axis=-1).argmin()]
+
+            # Estimate rotation matrix that aligns new normal to the positive z direction
+            contact_rot_mtx = rotation_family(new_normal, np.array([0, 0, 1]), contact_theta)
+
+            # Fix contact point and rotate points
+            sim_vertices = (sim_vertices - new_contact) @ contact_rot_mtx.T + new_contact
+            sim_vert_normals = sim_vert_normals @ contact_rot_mtx.T
+        else:
+            cx = orig_cx
+            cy = orig_cy
+            cz = orig_cz
+
+        # Ensure minimum height is 0.
+        sim_vertices[:, 2] -= sim_vertices[:, 2].min()
+        cz = 0.
+
+        if contact_jitter_rot_mtx is not None:
+            fixed_vertex = np.array([cx, cy, cz])
+            sim_vertices = (sim_vertices - fixed_vertex) @ contact_jitter_rot_mtx.T + fixed_vertex
+            sim_vert_normals = sim_vert_normals @ contact_jitter_rot_mtx.T
+        else:
+            sim_vert_normals = np.copy(sim_vert_normals)
+
+        # add the shifting and change to the pix coordinate
+        uu = ((sim_vertices[:,0] - cx)/psp.pixmm + psp.w//2+dx).astype(int)
+        vv = ((sim_vertices[:,1] - cy)/psp.pixmm + psp.h//2+dy).astype(int)
+        # check boundary of the image
+        mask_u = np.logical_and(uu > 0, uu < psp.w)
+        mask_v = np.logical_and(vv > 0, vv < psp.h)
+        # check the depth
+        mask_z = sim_vertices[:,2] > 0.2  # Filter points whose z value is below 0.2 (manual threshold)
+        mask_map = mask_u & mask_v & mask_z
+        heightMap[vv[mask_map],uu[mask_map]] = sim_vertices[mask_map][:,2]/psp.pixmm
+
+        # Fill in raw color and normals
+        rawcolorMap[vv[mask_map],uu[mask_map]] = self.colors[mask_map]
+        rawnormalMap[vv[mask_map],uu[mask_map]] = sim_vert_normals[mask_map]
+
+        # Normal map for visualization
+        vis_rawnormalMap = np.copy(rawnormalMap)
+        vis_rawnormalMap[vv[mask_map],uu[mask_map]] = (rawnormalMap[vv[mask_map],uu[mask_map]] + 1.0) * 0.5
+        vis_rawnormalMap = np.clip(vis_rawnormalMap, 0, 1)
+
+        max_g = np.max(gel_map)
+        min_g = np.min(gel_map)
+        max_o = np.max(heightMap)
+        # pressing depth in pixel
+        pressing_height_pix = pressing_height_mm/psp.pixmm
+
+        # shift the gelpad to interact with the object
+        gel_map = -1 * gel_map + (max_g+max_o-pressing_height_pix)  # RHS is gel height map assuming object placed at z = 0
+
+        # get the contact area
+        contact_mask = heightMap > gel_map
+
+        # combine contact area of object shape with non contact area of gelpad shape
+        zq = np.zeros((psp.h,psp.w))
+
+        zq[contact_mask]  = heightMap[contact_mask]
+        zq[~contact_mask] = gel_map[~contact_mask]
+
+        return zq, gel_map, contact_mask, rawcolorMap, rawnormalMap, vis_rawnormalMap, heightMap
+
+
 if __name__ == "__main__":
     data_folder = osp.join(osp.join( "..", "calibs"))
     filePath = osp.join('..', 'data', 'objects') if args.obj_path is None else args.obj_path
