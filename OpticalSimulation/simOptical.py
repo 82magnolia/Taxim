@@ -145,6 +145,7 @@ class simulator(object):
         print("load object: " + self.obj_name)
 
         pcd = o3d.io.read_point_cloud(objPath)
+        self.obj_scale_factor = obj_scale_factor
         self.vertices = np.asarray(pcd.points) * obj_scale_factor
 
         # Paint with uniform color if no colors exist
@@ -377,9 +378,9 @@ class simulator(object):
 
         # Set contact points given as array of shape (3, )
         if contact_point is not None:
-            cx = contact_point[0]
-            cy = contact_point[1]
-            cz = contact_point[2]
+            cx = contact_point[0] * self.obj_scale_factor
+            cy = contact_point[1] * self.obj_scale_factor
+            cz = contact_point[2] * self.obj_scale_factor
 
             # New contact point and normal direction
             new_contact = np.array([cx, cy, cz])
@@ -529,8 +530,9 @@ class mesh_simulator(simulator):
         print("load object: " + self.obj_name)
 
         # Load assets for mesh-based rendering
+        self.obj_scale_factor = obj_scale_factor
         self.tr_mesh = trimesh.load(objPath, force='mesh', process=False)
-        self.tr_mesh.vertices = np.asarray(self.tr_mesh.vertices) * obj_scale_factor
+        self.tr_mesh.vertices = np.asarray(self.tr_mesh.vertices) * self.obj_scale_factor
         self.proximitry_query = trimesh.proximity.ProximityQuery(self.tr_mesh)  # Used for nearest neighbor queries
         if not isinstance(self.tr_mesh, trimesh.Trimesh):
             raise ValueError("OBJ did not load as a single mesh")
@@ -609,9 +611,9 @@ class mesh_simulator(simulator):
 
         # Set contact points given as array of shape (3, )
         if contact_point is not None:
-            cx = contact_point[0]
-            cy = contact_point[1]
-            cz = contact_point[2]
+            cx = contact_point[0] * self.obj_scale_factor
+            cy = contact_point[1] * self.obj_scale_factor
+            cz = contact_point[2] * self.obj_scale_factor
 
             # Contact point array
             contact_arr = np.array([cx, cy, cz])
@@ -946,5 +948,5 @@ if __name__ == "__main__":
                 shadow_sim_video.release()
 
     if args.sim_type == 'mesh':
-        tac_sim.renderer.delete()
-        tac_sim.normal_renderer.delete()
+        sim.renderer.delete()
+        sim.normal_renderer.delete()
