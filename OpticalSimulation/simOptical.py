@@ -19,6 +19,8 @@ import os
 import open3d as o3d
 import warnings
 from matplotlib import colormaps
+import trimesh
+import pyrender
 
 parser = argparse.ArgumentParser()
 parser.add_argument("-obj", nargs='?', default='square',
@@ -32,6 +34,7 @@ parser.add_argument('-slide_range_info', default = [-1., 1., -1., 1., 100., 1.0]
 parser.add_argument('-rot_range_info', default = [0.3, 0.3, 0.3, 100., 1.0], type=float, help='Rotating range information (yaw_amplitude, pitch_amplitude, roll_amplitude, num_range, press_depth) into the gelpad.', nargs=5)
 parser.add_argument('-contact_point', default = None, type=float, help='Contact point location', nargs=3)
 parser.add_argument('-contact_theta', default = None, type=float, help='Contact point rotation angle')
+parser.add_argument('-sim_type', default = 'pcd', help='type of simulator to use')
 args = parser.parse_args()
 
 
@@ -279,7 +282,6 @@ class simulator(object):
         # get height index to shadow table
         contact_map = contact_height[contact_mask]
         height_idx = (contact_map * psp.pixmm - self.shadow_depth[0]) // pr.height_precision
-        height_idx_max = int(np.max(height_idx))
         total_height_idx = self.shadowTable.shape[2]
 
         shadowSim = np.zeros((psp.h,psp.w,3))
@@ -387,27 +389,30 @@ class simulator(object):
             contact_rot_mtx = rotation_family(new_normal, np.array([0, 0, 1]), contact_theta)
 
             # Fix contact point and rotate points
-            sim_vertices = (sim_vertices - new_contact) @ contact_rot_mtx.T + new_contact
+            sim_vertices = (sim_vertices - new_contact) @ contact_rot_mtx.T
             sim_vert_normals = sim_vert_normals @ contact_rot_mtx.T
         else:
             cx = orig_cx
             cy = orig_cy
             cz = orig_cz
-
-        # Ensure minimum height is 0.
-        sim_vertices[:, 2] -= sim_vertices[:, 2].min()
-        cz = 0.
+            contact = np.array([cx, cy, cz])
+            sim_vertices = (sim_vertices - contact) @ contact_rot_mtx.T
 
         if contact_jitter_rot_mtx is not None:
-            fixed_vertex = np.array([cx, cy, cz])
-            sim_vertices = (sim_vertices - fixed_vertex) @ contact_jitter_rot_mtx.T + fixed_vertex
+            sim_vertices = sim_vertices @ contact_jitter_rot_mtx.T
             sim_vert_normals = sim_vert_normals @ contact_jitter_rot_mtx.T
         else:
             sim_vert_normals = np.copy(sim_vert_normals)
 
+        # Ensure minimum height is 0. during rendering
+        sim_vertices[:, 2] -= sim_vertices[:, 2].min()
+        cz = 0.
+
         # add the shifting and change to the pix coordinate
-        uu = ((sim_vertices[:,0] - cx)/psp.pixmm + psp.w//2+dx).astype(int)
-        vv = ((sim_vertices[:,1] - cy)/psp.pixmm + psp.h//2+dy).astype(int)
+        uu = ((sim_vertices[:,0])/psp.pixmm + psp.w//2+dx).astype(int)
+        vv = ((sim_vertices[:,1])/psp.pixmm + psp.h//2+dy).astype(int)
+        vv = psp.h - vv  # NOTE: This is needed to ensure consistency with pyrender's orthographic rendering
+
         # check boundary of the image
         mask_u = np.logical_and(uu > 0, uu < psp.w)
         mask_v = np.logical_and(vv > 0, vv < psp.h)
@@ -510,7 +515,6 @@ class simulator(object):
         return np.pad(img, ((1, 1), (1, 1)), 'symmetric')
 
 
-# TODO: Finish implementing this
 class mesh_simulator(simulator):
     def __init__(self, data_folder, filePath, obj, obj_scale_factor=1.):
         """
@@ -525,18 +529,43 @@ class mesh_simulator(simulator):
         self.obj_name = obj.split('.')[0]
         print("load object: " + self.obj_name)
 
-        pcd = o3d.io.read_(objPath)
-        self.vertices = np.asarray(pcd.points) * obj_scale_factor
+        # Load assets for mesh-based rendering
+        self.tr_mesh = trimesh.load(objPath, force='mesh', process=False)
+        self.proximitry_query = trimesh.proximity.ProximityQuery(self.tr_mesh)  # Used for nearest neighbor queries
+        if not isinstance(self.tr_mesh, trimesh.Trimesh):
+            raise ValueError("OBJ did not load as a single mesh")
+        self.vertices = self.tr_mesh.vertices
+        self.vert_normals = self.tr_mesh.vertex_normals
 
-        # Paint with uniform color if no colors exist
-        if len(pcd.colors) == 0:
-            pcd = pcd.paint_uniform_color([0.5, 0.5, 0.5])
-        self.colors = np.asarray(pcd.colors)
+        # Set orthographic camera (NOTE: we assume camera to be fixed and the object to be moving)
+        self.znear = 0.01
+        self.zfar = 1000.0
 
-        if len(pcd.normals) == 0:  # Esimate normals if none exist
-            warnings.warn("No normals exist, resorting to Open3D normal estimation which is noisy")
-            pcd.estimate_normals()
-        self.vert_normals = np.asarray(pcd.normals)
+        self.cam = pyrender.camera.OrthographicCamera(
+            xmag=psp.pixmm * psp.h / 2.,  # NOTE: This will be automatically re-scaled respecting designated height and width for rendering
+            ymag=psp.pixmm * psp.h / 2.,  # NOTE: psp.h / 2. is multiplied to ensure identical orthographic scales as in Taxim
+            znear=self.znear,
+            zfar=self.zfar
+        )
+
+        # Camera pose in world frame
+        self.cam_height = 1000.0  # Hard-coded camera height
+        self.T_wc = np.eye(4)
+        self.T_wc[:3, :3] = np.eye(3)
+        self.T_wc[:3, 3] = np.array([0.0, 0.0, self.cam_height])
+
+        # Lighting for rendering
+        self.light = pyrender.DirectionalLight(color=np.ones(3), intensity=3.0)
+
+        # Set renderer for color and normals
+        self.renderer = pyrender.OffscreenRenderer(
+            viewport_width=psp.w,
+            viewport_height=psp.h
+        )
+        self.normal_renderer = pyrender.OffscreenRenderer(
+            viewport_width=psp.w,
+            viewport_height=psp.h
+        )
 
         # polytable
         calib_data = osp.join(data_folder, "polycalib.npz")
@@ -574,27 +603,9 @@ class mesh_simulator(simulator):
         # load dome-shape gelpad model
         gel_map = np.load(gelpad_model_path)
         gel_map = cv2.GaussianBlur(gel_map.astype(np.float32),(pr.kernel_size,pr.kernel_size),0)
-        heightMap = np.zeros((psp.h,psp.w))
-
-        # Raw color and normal maps
-        rawcolorMap = np.zeros((psp.h,psp.w,3))
-        rawnormalMap = np.zeros((psp.h,psp.w,3))
-
-        # Identify original contact points
-        orig_cx = np.mean(self.vertices[:,0])
-        orig_cy = np.mean(self.vertices[:,1])
-        xy_dist = np.linalg.norm(self.vertices[:, [0, 1]] - np.array([orig_cx, orig_cy]), axis=-1)
-        kth = min(100, xy_dist.shape[0] // 2)  # NOTE: This is an arbitrarily chosen number
-        topk_idx = np.argpartition(xy_dist, kth=kth)[:kth]
-        orig_cz = self.vertices[topk_idx, 2].max()
-
-        # Original concact point and normal direction
-        orig_contact = np.array([orig_cx, orig_cy, orig_cz])
-        orig_normal = self.vert_normals[np.linalg.norm(self.vertices - orig_contact, axis=-1).argmin()]
 
         # Copy original vertex set and normals
         sim_vertices = np.copy(self.vertices)
-        sim_vert_normals = np.copy(self.vert_normals)
 
         # Set contact points given as array of shape (3, )
         if contact_point is not None:
@@ -602,51 +613,106 @@ class mesh_simulator(simulator):
             cy = contact_point[1]
             cz = contact_point[2]
 
-            # New contact point and normal direction
-            new_contact = np.array([cx, cy, cz])
-            new_normal = sim_vert_normals[np.linalg.norm(self.vertices - new_contact, axis=-1).argmin()]
+            # Contact point array
+            contact_arr = np.array([cx, cy, cz])
+
+            # Find normal at contact point
+            nn_point, _, nn_fid = self.proximitry_query.on_surface(contact_arr.reshape(1, 3))
+            nn_bary = trimesh.triangles.points_to_barycentric(self.tr_mesh.triangles[nn_fid], points=contact_arr.reshape(1, 3))
+            new_normal = trimesh.unitize((self.tr_mesh.vertex_normals[self.tr_mesh.faces[nn_fid]] * trimesh.unitize(nn_bary).reshape(-1, 3, 1)).sum(axis=1))
+            new_normal = new_normal.reshape(-1)
 
             # Estimate rotation matrix that aligns new normal to the positive z direction
             contact_rot_mtx = rotation_family(new_normal, np.array([0, 0, 1]), contact_theta)
 
-            # Fix contact point and rotate points
-            sim_vertices = (sim_vertices - new_contact) @ contact_rot_mtx.T + new_contact
-            sim_vert_normals = sim_vert_normals @ contact_rot_mtx.T
-        else:
-            cx = orig_cx
-            cy = orig_cy
-            cz = orig_cz
+            # Fix contact point to origin and rotate points
+            sim_vertices = (sim_vertices - contact_arr) @ contact_rot_mtx.T
 
-        # Ensure minimum height is 0.
-        sim_vertices[:, 2] -= sim_vertices[:, 2].min()
-        cz = 0.
+        else:
+            # Identify original contact points
+            cx = np.mean(sim_vertices[:,0])
+            cy = np.mean(sim_vertices[:,1])
+            xy_dist = np.linalg.norm(sim_vertices[:, [0, 1]] - np.array([cx, cy]), axis=-1)
+            kth = min(100, xy_dist.shape[0] // 2)  # NOTE: This is an arbitrarily chosen number
+            topk_idx = np.argpartition(xy_dist, kth=kth)[:kth]
+            cz = sim_vertices[topk_idx, 2].max()
+            contact_arr = np.array([cx, cy, cz])
+
+            sim_vertices = sim_vertices - contact_arr
 
         if contact_jitter_rot_mtx is not None:
-            fixed_vertex = np.array([cx, cy, cz])
-            sim_vertices = (sim_vertices - fixed_vertex) @ contact_jitter_rot_mtx.T + fixed_vertex
-            sim_vert_normals = sim_vert_normals @ contact_jitter_rot_mtx.T
-        else:
-            sim_vert_normals = np.copy(sim_vert_normals)
+            sim_vertices = sim_vertices @ contact_jitter_rot_mtx.T
 
-        # add the shifting and change to the pix coordinate
-        uu = ((sim_vertices[:,0] - cx)/psp.pixmm + psp.w//2+dx).astype(int)
-        vv = ((sim_vertices[:,1] - cy)/psp.pixmm + psp.h//2+dy).astype(int)
-        # check boundary of the image
-        mask_u = np.logical_and(uu > 0, uu < psp.w)
-        mask_v = np.logical_and(vv > 0, vv < psp.h)
-        # check the depth
-        mask_z = sim_vertices[:,2] > 0.2  # Filter points whose z value is below 0.2 (manual threshold)
-        mask_map = mask_u & mask_v & mask_z
-        heightMap[vv[mask_map],uu[mask_map]] = sim_vertices[mask_map][:,2]/psp.pixmm
+        # Ensure minimum height is 0. during rendering (TODO: Only height for regions within the view are considered)
+        sim_vertices[:, 2] -= sim_vertices[:, 2].min()
 
-        # Fill in raw color and normals
-        rawcolorMap[vv[mask_map],uu[mask_map]] = self.colors[mask_map]
-        rawnormalMap[vv[mask_map],uu[mask_map]] = sim_vert_normals[mask_map]
+        # Render heightmap, color, and normals from mesh
+        scene = pyrender.Scene(bg_color=[1.0, 1.0, 1.0, 0.0],
+                                ambient_light=[0.3, 0.3, 0.3])
+        normal_scene = pyrender.Scene(bg_color=[1.0, 1.0, 1.0, 0.0],
+                                ambient_light=[0.3, 0.3, 0.3])  # Scene for normal map rendering
 
-        # Normal map for visualization
-        vis_rawnormalMap = np.copy(rawnormalMap)
-        vis_rawnormalMap[vv[mask_map],uu[mask_map]] = (rawnormalMap[vv[mask_map],uu[mask_map]] + 1.0) * 0.5
-        vis_rawnormalMap = np.clip(vis_rawnormalMap, 0, 1)
+        # Set up mesh for rendering
+        rgb_tr_mesh = self.tr_mesh.copy()
+        rgb_tr_mesh.vertices = sim_vertices
+        rgb_mesh = pyrender.Mesh.from_trimesh(rgb_tr_mesh, smooth=False)
+
+        normal_tr_mesh = trimesh.Trimesh(vertices=sim_vertices, faces=self.tr_mesh.faces)
+        normal_tr_mesh.visual.vertex_colors = np.astype(255 * (normal_tr_mesh.vertex_normals + 1.0) / 2., np.uint8)
+        normal_tr_mesh.visual.face_colors = np.astype(255 * (normal_tr_mesh.face_normals + 1.0) / 2., np.uint8)
+        normal_mesh = pyrender.Mesh.from_trimesh(normal_tr_mesh, smooth=False)
+
+        # Set up scene
+        scene.add(rgb_mesh)
+        normal_scene.add(normal_mesh)
+        scene.add(self.cam, pose=self.T_wc)
+        normal_scene.add(self.cam, pose=self.T_wc)
+        scene.add(self.light, pose=self.T_wc)
+        normal_scene.add(self.light, pose=self.T_wc)
+
+        # Render images
+        rawcolorMap, depth = self.renderer.render(scene)
+        rawcolorMap = rawcolorMap / 255.
+
+        # Obtain depth
+        depth_raw = depth.copy()
+        depth_raw[depth_raw == 0] = np.nan
+
+        # Normalize for visualization
+        d_min = np.nanmin(depth_raw)
+        d_max = np.nanmax(depth_raw)
+
+        depth_norm = (depth_raw - d_min) / (d_max - d_min + 1e-8)
+        depth_norm = np.nan_to_num(depth_norm)
+
+        depth_img = (depth_norm * 255).astype(np.uint8)
+
+        depth_raw = depth.copy()
+        noninf = depth_raw > 0
+        d_min = np.nanmin(depth_raw)
+        d_max = np.nanmax(depth_raw)
+
+        if (d_max - d_min) < (self.zfar - self.znear) / 10:  # CHOOSE A ROBUST CHECK FROM THRESHOLDING
+            # A hack to fix depth maps for OrthographicCamera.
+            # See: https://github.com/mmatl/pyrender/issues/72
+            depth_raw[noninf] = self.zfar + self.znear - self.zfar * self.znear / depth_raw[noninf]
+
+        # Obtain height map
+        height_raw = self.T_wc[2, -1] - depth_raw
+        height_raw[~noninf] = 0.
+        heightMap = height_raw / psp.pixmm
+
+        # Obtain normal map
+        normal_rgb, _ = self.normal_renderer.render(normal_scene, flags=pyrender.RenderFlags.FLAT)
+        normal = 2 * np.astype(normal_rgb, float) / 255 - 1.
+        invalid_normal_loc = np.all(normal_rgb == 255, axis=-1)
+        normal[invalid_normal_loc] = 0.
+        normal[~invalid_normal_loc] = normal[~invalid_normal_loc] / np.linalg.norm(normal[~invalid_normal_loc], axis=-1, keepdims=True)
+
+        rawnormalMap = np.copy(normal)
+        vis_rawnormalMap = np.copy(normal_rgb)
+        vis_rawnormalMap[invalid_normal_loc] = 0
+        vis_rawnormalMap = vis_rawnormalMap / 255.
 
         max_g = np.max(gel_map)
         min_g = np.min(gel_map)
@@ -673,15 +739,23 @@ if __name__ == "__main__":
     data_folder = osp.join(osp.join( "..", "calibs"))
     filePath = osp.join('..', 'data', 'objects') if args.obj_path is None else args.obj_path
     gelpad_model_path = osp.join( '..', 'calibs', 'gelmap5.npy')
-    obj = args.obj + '.ply'
 
     if args.contact_point is None:
         contact_point = None
     else:
         contact_point = np.array([args.contact_point[0], args.contact_point[1], args.contact_point[2]])
 
+    if args.sim_type == 'pcd':
+        obj = args.obj + '.ply'
+        tac_sim = simulator
+    elif args.sim_type == 'mesh':
+        obj = args.obj + '.obj'
+        tac_sim = mesh_simulator
+    else:
+        raise NotImplementedError("Other simulators not supported")
+
     if args.mode == "single_press":
-        sim = simulator(data_folder, filePath, obj, args.obj_scale_factor)
+        sim = tac_sim(data_folder, filePath, obj, args.obj_scale_factor)
         press_depth = args.depth
         dx = 0
         dy = 0
@@ -711,7 +785,7 @@ if __name__ == "__main__":
         cv2.imwrite(raw_color_savePath, cv2.cvtColor(raw_color_img, cv2.COLOR_RGB2BGR))
         cv2.imwrite(raw_normal_savePath, cv2.cvtColor(raw_normal_img, cv2.COLOR_RGB2BGR))
     elif args.mode == "continuous_press":
-        sim = simulator(data_folder, filePath, obj, args.obj_scale_factor)
+        sim = tac_sim(data_folder, filePath, obj, args.obj_scale_factor)
         press_min, press_max, num_step = args.depth_range_info
         num_step = int(num_step)
 
@@ -760,7 +834,7 @@ if __name__ == "__main__":
                 sim_video.release()
                 shadow_sim_video.release()
     elif args.mode == "rotating_press":
-        sim = simulator(data_folder, filePath, obj, args.obj_scale_factor)
+        sim = tac_sim(data_folder, filePath, obj, args.obj_scale_factor)
         yaw_amplitude, pitch_amplitude, roll_amplitude, num_step, press_depth = args.rot_range_info
         num_step = int(num_step)
         yaw_arr = np.linspace(-yaw_amplitude, yaw_amplitude, num_step)
@@ -815,7 +889,7 @@ if __name__ == "__main__":
                 sim_video.release()
                 shadow_sim_video.release()
     elif args.mode == "sliding_press":
-        sim = simulator(data_folder, filePath, obj, args.obj_scale_factor)
+        sim = tac_sim(data_folder, filePath, obj, args.obj_scale_factor)
         dx_min, dx_max, dy_min, dy_max, num_step, press_depth = args.slide_range_info
         num_step = int(num_step)
         slide_x = np.linspace(dx_min, dx_max, num_step)
@@ -863,3 +937,7 @@ if __name__ == "__main__":
             if press_idx == num_step - 1:
                 sim_video.release()
                 shadow_sim_video.release()
+
+    if args.sim_type == 'mesh':
+        tac_sim.renderer.delete()
+        tac_sim.normal_renderer.delete()
