@@ -4,3 +4,4 @@ opencv-python >= 3.4.2.17
 scipy
 trimesh
 pyrender
+rtree
