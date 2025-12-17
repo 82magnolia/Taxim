@@ -30,7 +30,7 @@ parser.add_argument('-obj_path', default = None, type=str, help='Directory conta
 parser.add_argument('-depth', default = 1.0, type=float, help='Indetation depth into the gelpad.')
 parser.add_argument('-obj_scale_factor', default = 1.0, type=float, help='Scale factor to multiply to object before simulation.')
 parser.add_argument('-depth_range_info', default = [0.1, 1.5, 100.], type=float, help='Indetation depth range information (min_depth, max_depth, num_range) into the gelpad.', nargs=3)
-parser.add_argument('-slide_range_info', default = [-1., 1., -1., 1., 100., 1.0], type=float, help='Sliding range information (min_x, max_x, min_y, max_y, num_range, press_depth) into the gelpad.', nargs=6)
+parser.add_argument('-slide_range_info', default = [-100., 100., -100., 100., 100., 1.0], type=float, help='Sliding range information (min_x, max_x, min_y, max_y, num_range, press_depth) into the gelpad.', nargs=6)
 parser.add_argument('-rot_range_info', default = [0.3, 0.3, 0.3, 100., 1.0], type=float, help='Rotating range information (yaw_amplitude, pitch_amplitude, roll_amplitude, num_range, press_depth) into the gelpad.', nargs=5)
 parser.add_argument('-contact_point', default = None, type=float, help='Contact point location', nargs=3)
 parser.add_argument('-contact_theta', default = None, type=float, help='Contact point rotation angle')
@@ -417,9 +417,8 @@ class simulator(object):
         mask_u = np.logical_and(uu > 0, uu < psp.w)
         mask_v = np.logical_and(vv > 0, vv < psp.h)
         # check the depth
-        mask_z = sim_vertices[:,2] > 0.2  # Filter points whose z value is below 0.2 (manual threshold)
-        mask_map = mask_u & mask_v & mask_z
-        heightMap[vv[mask_map],uu[mask_map]] = sim_vertices[mask_map][:,2]/psp.pixmm
+        mask_map = mask_u & mask_v
+        heightMap[vv[mask_map],uu[mask_map]] = sim_vertices[mask_map][:,2]/psp.pixmm  # NOTE: We don't re-normalize with minimum value as point projections have holes, causing inaccurate minimum values
 
         # Fill in raw color and normals
         rawcolorMap[vv[mask_map],uu[mask_map]] = self.colors[mask_map]
@@ -531,6 +530,7 @@ class mesh_simulator(simulator):
 
         # Load assets for mesh-based rendering
         self.tr_mesh = trimesh.load(objPath, force='mesh', process=False)
+        self.tr_mesh.vertices = np.asarray(self.tr_mesh.vertices) * obj_scale_factor
         self.proximitry_query = trimesh.proximity.ProximityQuery(self.tr_mesh)  # Used for nearest neighbor queries
         if not isinstance(self.tr_mesh, trimesh.Trimesh):
             raise ValueError("OBJ did not load as a single mesh")
@@ -643,7 +643,11 @@ class mesh_simulator(simulator):
         if contact_jitter_rot_mtx is not None:
             sim_vertices = sim_vertices @ contact_jitter_rot_mtx.T
 
-        # Ensure minimum height is 0. during rendering (TODO: Only height for regions within the view are considered)
+        # Add sensor-plane shifts
+        sim_vertices[:, 0] = sim_vertices[:, 0] + dx * psp.pixmm
+        sim_vertices[:, 1] = sim_vertices[:, 1] + dy * psp.pixmm
+
+        # Ensure minimum height is 0. during rendering
         sim_vertices[:, 2] -= sim_vertices[:, 2].min()
 
         # Render heightmap, color, and normals from mesh
@@ -700,6 +704,9 @@ class mesh_simulator(simulator):
         # Obtain height map
         height_raw = self.T_wc[2, -1] - depth_raw
         height_raw[~noninf] = 0.
+
+        # Ensure minimum height is 0. only considering regions within the view
+        height_raw[noninf] = height_raw[noninf] - height_raw[noninf].min()
         heightMap = height_raw / psp.pixmm
 
         # Obtain normal map
