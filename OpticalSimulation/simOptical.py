@@ -35,6 +35,7 @@ parser.add_argument('-rot_range_info', default = [0.3, 0.3, 0.3, 100., 1.0], typ
 parser.add_argument('-contact_point', default = None, type=float, help='Contact point location', nargs=3)
 parser.add_argument('-contact_theta', default = None, type=float, help='Contact point rotation angle')
 parser.add_argument('-sim_type', default = 'pcd', help='type of simulator to use')
+parser.add_argument('-override_hw', default = None, type=int, help='Size of image to generate which will be overridden from default', nargs=2)
 args = parser.parse_args()
 
 
@@ -131,7 +132,7 @@ def rotation_family(n1, n2, theta):
 
 
 class simulator(object):
-    def __init__(self, data_folder, filePath, obj, obj_scale_factor=1.):
+    def __init__(self, data_folder, filePath, obj, obj_scale_factor=1., override_hw=None):
         """
         Initialize the simulator.
         1) load the object,
@@ -166,6 +167,12 @@ class simulator(object):
         rawData = osp.join(data_folder, "dataPack.npz")
         data_file = np.load(rawData,allow_pickle=True)
         self.f0 = data_file['f0']
+
+        # Optionally resize original frame
+        if self.f0.shape[0] != self.psp_h or self.f0.shape[1] != self.psp_w:
+            warnings.warn("Initial frame of inconsistent size with desired sensor height/width is provided, using interpolation for reshaping")
+            self.f0 = cv2.resize(self.f0, (self.psp_w, self.psp_h))
+
         self.bg_proc = self.processInitialFrame()
 
         #shadow calibration
@@ -173,6 +180,19 @@ class simulator(object):
         shadowData = np.load(osp.join(data_folder, "shadowTable.npz"),allow_pickle=True)
         self.direction = shadowData['shadowDirections']
         self.shadowTable = shadowData['shadowTable']
+
+        # Optionally override height and width
+        if override_hw is not None:
+            self.psp_h, self.psp_w = override_hw
+            self.psp_mm = psp.pixmm * psp.h / self.psp_h  # Rescale parameters
+            self.height_psp_mm = psp.pixmm  # NOTE: We use fixed height scaling
+        else:
+            self.psp_h, self.psp_w = psp.h, psp.w
+            self.psp_mm = psp.pixmm
+            self.height_psp_mm = psp.pixmm
+
+        if self.height_psp_mm != self.psp_mm:
+            warnings.warn("Using different scaling factor for height, width and depth")
 
     def processInitialFrame(self):
         """
@@ -224,13 +244,13 @@ class simulator(object):
         grad_mag, grad_dir = self.generate_normals(heightMap)
 
         # generate raw simulated image without background
-        sim_img_r = np.zeros((psp.h,psp.w,3))
+        sim_img_r = np.zeros((self.psp_h,self.psp_w,3))
         bins = psp.numBins
 
-        [xx, yy] = np.meshgrid(range(psp.w), range(psp.h))
+        [xx, yy] = np.meshgrid(range(self.psp_w), range(self.psp_h))
         xf = xx.flatten()
         yf = yy.flatten()
-        A = np.array([xf*xf,yf*yf,xf*yf,xf,yf,np.ones(psp.h*psp.w)]).T
+        A = np.array([xf*xf,yf*yf,xf*yf,xf,yf,np.ones(self.psp_h*self.psp_w)]).T
         binm = bins - 1
 
         # discritize grids
@@ -242,19 +262,19 @@ class simulator(object):
 
         # look up polynomial table and assign intensity
         params_r = self.calib_data.grad_r[idx_x,idx_y,:]
-        params_r = params_r.reshape((psp.h*psp.w), params_r.shape[2])
+        params_r = params_r.reshape((self.psp_h*self.psp_w), params_r.shape[2])
         params_g = self.calib_data.grad_g[idx_x,idx_y,:]
-        params_g = params_g.reshape((psp.h*psp.w), params_g.shape[2])
+        params_g = params_g.reshape((self.psp_h*self.psp_w), params_g.shape[2])
         params_b = self.calib_data.grad_b[idx_x,idx_y,:]
-        params_b = params_b.reshape((psp.h*psp.w), params_b.shape[2])
+        params_b = params_b.reshape((self.psp_h*self.psp_w), params_b.shape[2])
 
         est_r = np.sum(A * params_r,axis = 1)
         est_g = np.sum(A * params_g,axis = 1)
         est_b = np.sum(A * params_b,axis = 1)
 
-        sim_img_r[:,:,0] = est_r.reshape((psp.h,psp.w))
-        sim_img_r[:,:,1] = est_g.reshape((psp.h,psp.w))
-        sim_img_r[:,:,2] = est_b.reshape((psp.h,psp.w))
+        sim_img_r[:,:,0] = est_r.reshape((self.psp_h,self.psp_w))
+        sim_img_r[:,:,1] = est_g.reshape((self.psp_h,self.psp_w))
+        sim_img_r[:,:,2] = est_b.reshape((self.psp_h,self.psp_w))
 
         # attach background to simulated image
         sim_img = sim_img_r + self.bg_proc
@@ -263,8 +283,8 @@ class simulator(object):
             return sim_img, sim_img
 
         # add shadow
-        cx = psp.w//2
-        cy = psp.h//2
+        cx = self.psp_w//2
+        cy = self.psp_h//2
 
         # find shadow attachment area
         kernel = np.ones((5, 5), np.uint8)
@@ -282,10 +302,10 @@ class simulator(object):
         norm_idx = normMap // pr.discritize_precision
         # get height index to shadow table
         contact_map = contact_height[contact_mask]
-        height_idx = (contact_map * psp.pixmm - self.shadow_depth[0]) // pr.height_precision
+        height_idx = (contact_map * self.height_psp_mm - self.shadow_depth[0]) // pr.height_precision
         total_height_idx = self.shadowTable.shape[2]
 
-        shadowSim = np.zeros((psp.h,psp.w,3))
+        shadowSim = np.zeros((self.psp_h,self.psp_w,3))
 
         # all 3 channels
         for c in range(3):
@@ -324,7 +344,7 @@ class simulator(object):
                         cur_x = int(cx_origin + pr.shadow_step * s * ct)
                         cur_y = int(cy_origin + pr.shadow_step * s * st)
                         # check boundary of the image and height's difference
-                        if cur_x >= 0 and cur_x < psp.w and cur_y >= 0 and cur_y < psp.h and heightMap[cy_origin,cx_origin] > heightMap[cur_y,cur_x]:
+                        if cur_x >= 0 and cur_x < self.psp_w and cur_y >= 0 and cur_y < self.psp_h and heightMap[cy_origin,cx_origin] > heightMap[cur_y,cur_x]:
                             frame[cur_y,cur_x] = np.minimum(frame[cur_y,cur_x],v[s])
 
             shadowSim[:,:,c] = frame
@@ -353,12 +373,18 @@ class simulator(object):
         assert(self.vertices.shape[1] == 3)
         # load dome-shape gelpad model
         gel_map = np.load(gelpad_model_path)
+
+        # Optionally resize gel map
+        if gel_map.shape[0] != self.psp_h or gel_map.shape[1] != self.psp_w:
+            warnings.warn("Gelmap of inconsistent size with desired sensor height/width is provided, using interpolation for reshaping")
+            gel_map = cv2.resize(gel_map, (self.psp_w, self.psp_h))
+
         gel_map = cv2.GaussianBlur(gel_map.astype(np.float32),(pr.kernel_size,pr.kernel_size),0)
-        heightMap = np.zeros((psp.h,psp.w))
+        heightMap = np.zeros((self.psp_h,self.psp_w))
 
         # Raw color and normal maps
-        rawcolorMap = np.zeros((psp.h,psp.w,3))
-        rawnormalMap = np.zeros((psp.h,psp.w,3))
+        rawcolorMap = np.zeros((self.psp_h,self.psp_w,3))
+        rawnormalMap = np.zeros((self.psp_h,self.psp_w,3))
 
         # Identify original contact points
         orig_cx = np.mean(self.vertices[:,0])
@@ -410,16 +436,16 @@ class simulator(object):
         cz = 0.
 
         # add the shifting and change to the pix coordinate
-        uu = ((sim_vertices[:,0])/psp.pixmm + psp.w//2+dx).astype(int)
-        vv = ((sim_vertices[:,1])/psp.pixmm + psp.h//2+dy).astype(int)
-        vv = psp.h - vv  # NOTE: This is needed to ensure consistency with pyrender's orthographic rendering
+        uu = ((sim_vertices[:,0])/self.psp_mm + self.psp_w//2+dx).astype(int)
+        vv = ((sim_vertices[:,1])/self.psp_mm + self.psp_h//2+dy).astype(int)
+        vv = self.psp_h - vv  # NOTE: This is needed to ensure consistency with pyrender's orthographic rendering
 
         # check boundary of the image
-        mask_u = np.logical_and(uu > 0, uu < psp.w)
-        mask_v = np.logical_and(vv > 0, vv < psp.h)
+        mask_u = np.logical_and(uu > 0, uu < self.psp_w)
+        mask_v = np.logical_and(vv > 0, vv < self.psp_h)
         # check the depth
         mask_map = mask_u & mask_v
-        heightMap[vv[mask_map],uu[mask_map]] = sim_vertices[mask_map][:,2]/psp.pixmm  # NOTE: We don't re-normalize with minimum value as point projections have holes, causing inaccurate minimum values
+        heightMap[vv[mask_map],uu[mask_map]] = sim_vertices[mask_map][:,2]/self.height_psp_mm  # NOTE: We don't re-normalize with minimum value as point projections have holes, causing inaccurate minimum values
 
         # Fill in raw color and normals
         rawcolorMap[vv[mask_map],uu[mask_map]] = self.colors[mask_map]
@@ -434,7 +460,7 @@ class simulator(object):
         min_g = np.min(gel_map)
         max_o = np.max(heightMap)
         # pressing depth in pixel
-        pressing_height_pix = pressing_height_mm/psp.pixmm
+        pressing_height_pix = pressing_height_mm/self.height_psp_mm
 
         # shift the gelpad to interact with the object
         gel_map = -1 * gel_map + (max_g+max_o-pressing_height_pix)  # RHS is gel height map assuming object placed at z = 0
@@ -443,7 +469,7 @@ class simulator(object):
         contact_mask = heightMap > gel_map
 
         # combine contact area of object shape with non contact area of gelpad shape
-        zq = np.zeros((psp.h,psp.w))
+        zq = np.zeros((self.psp_h,self.psp_w))
 
         zq[contact_mask]  = heightMap[contact_mask]
         zq[~contact_mask] = gel_map[~contact_mask]
@@ -453,7 +479,7 @@ class simulator(object):
     def deformApprox(self, pressing_height_mm, height_map, gel_map, contact_mask):
         zq = height_map.copy()
         zq_back = zq.copy()
-        pressing_height_pix = pressing_height_mm/psp.pixmm
+        pressing_height_pix = pressing_height_mm/self.height_psp_mm
         # contact mask which is a little smaller than the real contact mask
         mask = (zq-(gel_map)) > pressing_height_pix * pr.contact_scale
         mask = mask & contact_mask
@@ -516,7 +542,7 @@ class simulator(object):
 
 
 class mesh_simulator(simulator):
-    def __init__(self, data_folder, filePath, obj, obj_scale_factor=1.):
+    def __init__(self, data_folder, filePath, obj, obj_scale_factor=1., override_hw=None):
         """
         Initialize the simulator.
         1) load the object,
@@ -528,6 +554,19 @@ class mesh_simulator(simulator):
         objPath = osp.join(filePath,obj)
         self.obj_name = obj.split('.')[0]
         print("load object: " + self.obj_name)
+
+        # Optionally override height and width
+        if override_hw is not None:
+            self.psp_h, self.psp_w = override_hw
+            self.psp_mm = psp.pixmm * psp.h / self.psp_h  # Rescale parameters
+            self.height_psp_mm = psp.pixmm  # NOTE: We use fixed height scaling
+        else:
+            self.psp_h, self.psp_w = psp.h, psp.w
+            self.psp_mm = psp.pixmm
+            self.height_psp_mm = psp.pixmm
+
+        if self.height_psp_mm != self.psp_mm:
+            warnings.warn("Using different scaling factor for height, width and depth")
 
         # Load assets for mesh-based rendering
         self.obj_scale_factor = obj_scale_factor
@@ -544,8 +583,8 @@ class mesh_simulator(simulator):
         self.zfar = 1000.0
 
         self.cam = pyrender.camera.OrthographicCamera(
-            xmag=psp.pixmm * psp.h / 2.,  # NOTE: This will be automatically re-scaled respecting designated height and width for rendering
-            ymag=psp.pixmm * psp.h / 2.,  # NOTE: psp.h / 2. is multiplied to ensure identical orthographic scales as in Taxim
+            xmag=self.psp_mm * self.psp_h / 2.,  # NOTE: This will be automatically re-scaled respecting designated height and width for rendering
+            ymag=self.psp_mm * self.psp_h / 2.,  # NOTE: self.psp_h / 2. is multiplied to ensure identical orthographic scales as in Taxim
             znear=self.znear,
             zfar=self.zfar
         )
@@ -561,12 +600,12 @@ class mesh_simulator(simulator):
 
         # Set renderer for color and normals
         self.renderer = pyrender.OffscreenRenderer(
-            viewport_width=psp.w,
-            viewport_height=psp.h
+            viewport_width=self.psp_w,
+            viewport_height=self.psp_h
         )
         self.normal_renderer = pyrender.OffscreenRenderer(
-            viewport_width=psp.w,
-            viewport_height=psp.h
+            viewport_width=self.psp_w,
+            viewport_height=self.psp_h
         )
 
         # polytable
@@ -577,6 +616,12 @@ class mesh_simulator(simulator):
         rawData = osp.join(data_folder, "dataPack.npz")
         data_file = np.load(rawData,allow_pickle=True)
         self.f0 = data_file['f0']
+
+        # Optionally resize original frame
+        if self.f0.shape[0] != self.psp_h or self.f0.shape[1] != self.psp_w:
+            warnings.warn("Initial frame of inconsistent size with desired sensor height/width is provided, using interpolation for reshaping")
+            self.f0 = cv2.resize(self.f0, (self.psp_w, self.psp_h))
+
         self.bg_proc = self.processInitialFrame()
 
         #shadow calibration
@@ -604,6 +649,12 @@ class mesh_simulator(simulator):
         assert(self.vertices.shape[1] == 3)
         # load dome-shape gelpad model
         gel_map = np.load(gelpad_model_path)
+
+        # Optionally resize gel map
+        if gel_map.shape[0] != self.psp_h or gel_map.shape[1] != self.psp_w:
+            warnings.warn("Gelmap of inconsistent size with desired sensor height/width is provided, using interpolation for reshaping")
+            gel_map = cv2.resize(gel_map, (self.psp_w, self.psp_h))
+
         gel_map = cv2.GaussianBlur(gel_map.astype(np.float32),(pr.kernel_size,pr.kernel_size),0)
 
         # Copy original vertex set and normals
@@ -646,8 +697,8 @@ class mesh_simulator(simulator):
             sim_vertices = sim_vertices @ contact_jitter_rot_mtx.T
 
         # Add sensor-plane shifts
-        sim_vertices[:, 0] = sim_vertices[:, 0] + dx * psp.pixmm
-        sim_vertices[:, 1] = sim_vertices[:, 1] + dy * psp.pixmm
+        sim_vertices[:, 0] = sim_vertices[:, 0] + dx * self.psp_mm
+        sim_vertices[:, 1] = sim_vertices[:, 1] + dy * self.psp_mm
 
         # Ensure minimum height is 0. during rendering
         sim_vertices[:, 2] -= sim_vertices[:, 2].min()
@@ -709,7 +760,7 @@ class mesh_simulator(simulator):
 
         # Ensure minimum height is 0. only considering regions within the view
         height_raw[noninf] = height_raw[noninf] - height_raw[noninf].min()
-        heightMap = height_raw / psp.pixmm
+        heightMap = height_raw / self.height_psp_mm
 
         # Obtain normal map
         normal_rgb, _ = self.normal_renderer.render(normal_scene, flags=pyrender.RenderFlags.FLAT)
@@ -727,7 +778,7 @@ class mesh_simulator(simulator):
         min_g = np.min(gel_map)
         max_o = np.max(heightMap)
         # pressing depth in pixel
-        pressing_height_pix = pressing_height_mm/psp.pixmm
+        pressing_height_pix = pressing_height_mm/self.height_psp_mm
 
         # shift the gelpad to interact with the object
         gel_map = -1 * gel_map + (max_g+max_o-pressing_height_pix)  # RHS is gel height map assuming object placed at z = 0
@@ -736,7 +787,7 @@ class mesh_simulator(simulator):
         contact_mask = heightMap > gel_map
 
         # combine contact area of object shape with non contact area of gelpad shape
-        zq = np.zeros((psp.h,psp.w))
+        zq = np.zeros((self.psp_h,self.psp_w))
 
         zq[contact_mask]  = heightMap[contact_mask]
         zq[~contact_mask] = gel_map[~contact_mask]
@@ -764,7 +815,7 @@ if __name__ == "__main__":
         raise NotImplementedError("Other simulators not supported")
 
     if args.mode == "single_press":
-        sim = tac_sim(data_folder, filePath, obj, args.obj_scale_factor)
+        sim = tac_sim(data_folder, filePath, obj, args.obj_scale_factor, args.override_hw)
         press_depth = args.depth
         dx = 0
         dy = 0
@@ -794,7 +845,7 @@ if __name__ == "__main__":
         cv2.imwrite(raw_color_savePath, cv2.cvtColor(raw_color_img, cv2.COLOR_RGB2BGR))
         cv2.imwrite(raw_normal_savePath, cv2.cvtColor(raw_normal_img, cv2.COLOR_RGB2BGR))
     elif args.mode == "continuous_press":
-        sim = tac_sim(data_folder, filePath, obj, args.obj_scale_factor)
+        sim = tac_sim(data_folder, filePath, obj, args.obj_scale_factor, args.override_hw)
         press_min, press_max, num_step = args.depth_range_info
         num_step = int(num_step)
 
@@ -843,7 +894,7 @@ if __name__ == "__main__":
                 sim_video.release()
                 shadow_sim_video.release()
     elif args.mode == "rotating_press":
-        sim = tac_sim(data_folder, filePath, obj, args.obj_scale_factor)
+        sim = tac_sim(data_folder, filePath, obj, args.obj_scale_factor, args.override_hw)
         yaw_amplitude, pitch_amplitude, roll_amplitude, num_step, press_depth = args.rot_range_info
         num_step = int(num_step)
         yaw_arr = np.linspace(-yaw_amplitude, yaw_amplitude, num_step)
@@ -898,7 +949,7 @@ if __name__ == "__main__":
                 sim_video.release()
                 shadow_sim_video.release()
     elif args.mode == "sliding_press":
-        sim = tac_sim(data_folder, filePath, obj, args.obj_scale_factor)
+        sim = tac_sim(data_folder, filePath, obj, args.obj_scale_factor, args.override_hw)
         dx_min, dx_max, dy_min, dy_max, num_step, press_depth = args.slide_range_info
         num_step = int(num_step)
         slide_x = np.linspace(dx_min, dx_max, num_step)
