@@ -576,7 +576,7 @@ class mesh_simulator(simulator):
         if not isinstance(self.tr_mesh, trimesh.Trimesh):
             raise ValueError("OBJ did not load as a single mesh")
         self.vertices = self.tr_mesh.vertices
-        self.vert_normals = self.tr_mesh.vertex_normals
+        self.vert_normals = trimesh.smoothing.get_vertices_normals(self.tr_mesh)  # Use smoothed vertex normals for reliable estimation
 
         # Set orthographic camera (NOTE: we assume camera to be fixed and the object to be moving)
         self.znear = 0.01
