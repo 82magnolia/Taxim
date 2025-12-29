@@ -22,22 +22,6 @@ from matplotlib import colormaps
 import trimesh
 import pyrender
 
-parser = argparse.ArgumentParser()
-parser.add_argument("-obj", nargs='?', default='square',
-                    help="Name of Object to be tested, supported_objects_list = [square, cylinder6]")
-parser.add_argument('-mode', default="single_press", type=str, help="Type of simulation to apply")
-parser.add_argument('-obj_path', default = None, type=str, help='Directory containing object point cloud')
-parser.add_argument('-depth', default = 1.0, type=float, help='Indetation depth into the gelpad.')
-parser.add_argument('-obj_scale_factor', default = 1.0, type=float, help='Scale factor to multiply to object before simulation.')
-parser.add_argument('-depth_range_info', default = [0.1, 1.5, 100.], type=float, help='Indetation depth range information (min_depth, max_depth, num_range) into the gelpad.', nargs=3)
-parser.add_argument('-slide_range_info', default = [-100., 100., -100., 100., 100., 1.0], type=float, help='Sliding range information (min_x, max_x, min_y, max_y, num_range, press_depth) into the gelpad.', nargs=6)
-parser.add_argument('-rot_range_info', default = [0.3, 0.3, 0.3, 100., 1.0], type=float, help='Rotating range information (yaw_amplitude, pitch_amplitude, roll_amplitude, num_range, press_depth) into the gelpad.', nargs=5)
-parser.add_argument('-contact_point', default = None, type=float, help='Contact point location', nargs=3)
-parser.add_argument('-contact_theta', default = None, type=float, help='Contact point rotation angle')
-parser.add_argument('-sim_type', default = 'pcd', help='type of simulator to use')
-parser.add_argument('-override_hw', default = None, type=int, help='Size of image to generate which will be overridden from default', nargs=2)
-args = parser.parse_args()
-
 
 def rot_from_ypr(ypr_array):
     def _ypr2mtx(ypr):
@@ -784,7 +768,7 @@ class mesh_simulator(simulator):
         gel_map = -1 * gel_map + (max_g+max_o-pressing_height_pix)  # RHS is gel height map assuming object placed at z = 0
 
         # get the contact area
-        contact_mask = heightMap > gel_map
+        contact_mask = (heightMap > gel_map) & noninf
 
         # combine contact area of object shape with non contact area of gelpad shape
         zq = np.zeros((self.psp_h,self.psp_w))
@@ -796,6 +780,22 @@ class mesh_simulator(simulator):
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("-obj", nargs='?', default='square',
+                        help="Name of Object to be tested, supported_objects_list = [square, cylinder6]")
+    parser.add_argument('-mode', default="single_press", type=str, help="Type of simulation to apply")
+    parser.add_argument('-obj_path', default = None, type=str, help='Directory containing object point cloud')
+    parser.add_argument('-depth', default = 1.0, type=float, help='Indetation depth into the gelpad.')
+    parser.add_argument('-obj_scale_factor', default = 1.0, type=float, help='Scale factor to multiply to object before simulation.')
+    parser.add_argument('-depth_range_info', default = [0.1, 1.5, 100.], type=float, help='Indetation depth range information (min_depth, max_depth, num_range) into the gelpad.', nargs=3)
+    parser.add_argument('-slide_range_info', default = [-100., 100., -100., 100., 100., 1.0], type=float, help='Sliding range information (min_x, max_x, min_y, max_y, num_range, press_depth) into the gelpad.', nargs=6)
+    parser.add_argument('-rot_range_info', default = [0.3, 0.3, 0.3, 100., 1.0], type=float, help='Rotating range information (yaw_amplitude, pitch_amplitude, roll_amplitude, num_range, press_depth) into the gelpad.', nargs=5)
+    parser.add_argument('-contact_point', default = None, type=float, help='Contact point location', nargs=3)
+    parser.add_argument('-contact_theta', default = None, type=float, help='Contact point rotation angle')
+    parser.add_argument('-sim_type', default = 'pcd', help='type of simulator to use')
+    parser.add_argument('-override_hw', default = None, type=int, help='Size of image to generate which will be overridden from default', nargs=2)
+    args = parser.parse_args()
+
     data_folder = osp.join(osp.join( "..", "calibs"))
     filePath = osp.join('..', 'data', 'objects') if args.obj_path is None else args.obj_path
     gelpad_model_path = osp.join( '..', 'calibs', 'gelmap5.npy')
