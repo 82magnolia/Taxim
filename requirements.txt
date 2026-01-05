@@ -6,3 +6,4 @@ trimesh
 pyrender
 rtree
 open3d
+tqdm
