@@ -22,6 +22,8 @@ from matplotlib import colormaps
 import trimesh
 import pyrender
 
+os.environ['PYOPENGL_PLATFORM'] = 'egl'
+
 
 def rot_from_ypr(ypr_array):
     def _ypr2mtx(ypr):
