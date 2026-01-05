@@ -4,6 +4,8 @@ Taxim is an example-based simulator for GelSight tactile sensors and its variati
 ## Installation and Prerequisites
 Basic dependencies: numpy, scipy, matplotlib, cv2
 
+First run `conda create -n taxim python=3.10`
+
 To install dependencies: `pip install -r requirements.txt`
 
 Optional dependencies: ros with usb-cam driver (to collect the tactile images from a tactile sensor), nanogui (to annotate the raw data.)
