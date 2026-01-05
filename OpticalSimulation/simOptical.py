@@ -528,7 +528,7 @@ class simulator(object):
 
 
 class mesh_simulator(simulator):
-    def __init__(self, data_folder, filePath, obj, obj_scale_factor=1., override_hw=None):
+    def __init__(self, data_folder, filePath, obj, obj_scale_factor=1., override_hw=None, renderer=None, normal_renderer=None):
         """
         Initialize the simulator.
         1) load the object,
@@ -585,14 +585,21 @@ class mesh_simulator(simulator):
         self.light = pyrender.DirectionalLight(color=np.ones(3), intensity=3.0)
 
         # Set renderer for color and normals
-        self.renderer = pyrender.OffscreenRenderer(
-            viewport_width=self.psp_w,
-            viewport_height=self.psp_h
-        )
-        self.normal_renderer = pyrender.OffscreenRenderer(
-            viewport_width=self.psp_w,
-            viewport_height=self.psp_h
-        )
+        if renderer is None:  # Set new renderer
+            self.renderer = pyrender.OffscreenRenderer(
+                viewport_width=self.psp_w,
+                viewport_height=self.psp_h
+            )
+        else:  # NOTE: Renderer should only be set once to enable off-screen rendering
+            self.renderer = renderer
+
+        if normal_renderer is None:  # Set new renderer
+            self.normal_renderer = pyrender.OffscreenRenderer(
+                viewport_width=self.psp_w,
+                viewport_height=self.psp_h
+            )
+        else:  # NOTE: Renderer should only be set once to enable off-screen rendering
+            self.normal_renderer = normal_renderer
 
         # polytable
         calib_data = osp.join(data_folder, "polycalib.npz")

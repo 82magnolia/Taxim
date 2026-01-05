@@ -6,6 +6,10 @@ import open3d as o3d
 import numpy as np
 import cv2
 from matplotlib import colormaps
+import pyrender
+import Basics.sensorParams as psp
+
+os.environ['PYOPENGL_PLATFORM'] = 'egl'
 
 
 if __name__ == "__main__":
@@ -39,6 +43,25 @@ if __name__ == "__main__":
 
     keypoint_root = os.path.join(args.point_root, "keypoints")
     randpoint_root = os.path.join(args.point_root, "randpoints")
+
+    # Optionally override height and width
+    if args.override_hw is not None:
+        psp_h, psp_w = args.override_hw
+        height_psp_mm = psp.pixmm  # NOTE: We use fixed height scaling
+    else:
+        psp_h, psp_w = psp.h, psp.w
+        height_psp_mm = psp.pixmm
+
+    # Set renderer before setting simulator to enable off-screen rendering
+    renderer = pyrender.OffscreenRenderer(
+        viewport_width=psp_w,
+        viewport_height=psp_h
+    )
+    normal_renderer = pyrender.OffscreenRenderer(
+        viewport_width=psp_w,
+        viewport_height=psp_h
+    )
+
 
     for mesh_idx, mesh_path in enumerate(mesh_path_list):
         obj_idx = eval(mesh_path.split("/")[-2])
@@ -75,7 +98,7 @@ if __name__ == "__main__":
         else:
             raise NotImplementedError("Other scaling methods not supported")
 
-        sim = mesh_simulator(data_folder, file_path, 'model.obj', obj_scale_factor, args.override_hw)
+        sim = mesh_simulator(data_folder, file_path, 'model.obj', obj_scale_factor, args.override_hw, renderer, normal_renderer)
         press_depth = args.depth
 
         for contact_idx, contact_point in tqdm(enumerate(contactpts), total=contactpts.shape[0], desc="Touch generation"):
