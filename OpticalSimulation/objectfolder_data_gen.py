@@ -20,6 +20,7 @@ if __name__ == "__main__":
     parser.add_argument('--max_len_value', default=50.0, type=float, help="Maximum length value to use for scaling")
     parser.add_argument('--only_render', action='store_true', help="Optionally choose to only perform rendering")
     parser.add_argument('--obj_range', default=None, help="Object index range (start_idx, end_idx) inclusive, to generate data", nargs=2, type=int)
+    parser.add_argument('--max_point', default=None, help="Maximum number of points to sample from an object mesh", type=int)
     args = parser.parse_args()
 
     if not os.path.exists(args.save_root):
@@ -54,6 +55,12 @@ if __name__ == "__main__":
         keypts = np.asarray(o3d.io.read_point_cloud(keypoint_path).points)
         randpts = np.asarray(o3d.io.read_point_cloud(randpoint_path).points)
         contactpts = np.concatenate([keypts, randpts], axis=0)
+
+        if args.max_point is not None and contactpts.shape[0] > args.max_point:  # Ensure maximum number of points to be sampled
+            contact_pcd = o3d.geometry.PointCloud()
+            contact_pcd.points = o3d.utility.Vector3dVector(contactpts)
+            contact_pcd = contact_pcd.farthest_point_down_sample(args.max_point)
+            contactpts = np.asarray(contact_pcd.points)
 
         # Set up mesh simulator
         data_folder = os.path.join(os.path.join( ".", "calibs"))
