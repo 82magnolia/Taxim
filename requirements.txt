@@ -5,3 +5,4 @@ scipy
 trimesh
 pyrender
 rtree
+open3d
