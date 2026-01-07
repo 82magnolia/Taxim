@@ -1006,7 +1006,3 @@ if __name__ == "__main__":
             if press_idx == num_step - 1:
                 sim_video.release()
                 shadow_sim_video.release()
-
-    if args.sim_type == 'mesh':
-        sim.renderer.delete()
-        sim.normal_renderer.delete()
