@@ -751,8 +751,9 @@ class mesh_simulator(simulator):
         height_raw = self.T_wc[2, -1] - depth_raw
         height_raw[~noninf] = 0.
 
-        # Ensure minimum height is 0. only considering regions within the view
-        height_raw[noninf] = height_raw[noninf] - height_raw[noninf].min()
+        if noninf.sum() != 0:  # Ensure minimum height is 0. only considering regions within the view
+            height_raw[noninf] = height_raw[noninf] - height_raw[noninf].min()
+
         heightMap = height_raw / self.height_psp_mm
 
         # Obtain normal map
