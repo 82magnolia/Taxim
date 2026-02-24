@@ -853,12 +853,19 @@ if __name__ == "__main__":
 
         cv2.imwrite(raw_color_savePath, cv2.cvtColor(raw_color_img, cv2.COLOR_RGB2BGR))
         cv2.imwrite(raw_normal_savePath, cv2.cvtColor(raw_normal_img, cv2.COLOR_RGB2BGR))
-    elif args.mode == "continuous_press":
+    elif args.mode in ["continuous_press", "back_forth_press"]:
         sim = tac_sim(data_folder, filePath, obj, args.obj_scale_factor, args.override_hw)
         press_min, press_max, num_step = args.depth_range_info
         num_step = int(num_step)
 
-        for press_idx, press_depth in tqdm(enumerate(np.linspace(press_min, press_max, num_step)), total=num_step):
+        if args.mode == "continuous_press":
+            press_depth_arr = np.linspace(press_min, press_max, num_step)
+        else:  # Back and forth pressing
+            press_depth_back = np.linspace(press_min, press_max, num_step // 2)
+            press_depth_forth = np.linspace(press_max, press_min, num_step - num_step // 2 + 1)
+            press_depth_arr = np.concatenate([press_depth_back, press_depth_forth[1:]], axis=0)
+
+        for press_idx, press_depth in tqdm(enumerate(press_depth_arr), total=num_step):
             dx = 0
             dy = 0
 
