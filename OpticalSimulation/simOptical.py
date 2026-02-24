@@ -804,6 +804,7 @@ if __name__ == "__main__":
     parser.add_argument('-contact_theta', default = None, type=float, help='Contact point rotation angle')
     parser.add_argument('-sim_type', default = 'pcd', help='type of simulator to use')
     parser.add_argument('-override_hw', default = None, type=int, help='Size of image to generate which will be overridden from default', nargs=2)
+    parser.add_argument('-save_folder', default = None, type=str, help='Name of folder to use for saving results')
     args = parser.parse_args()
 
     data_folder = osp.join(osp.join( "..", "calibs"))
@@ -824,6 +825,10 @@ if __name__ == "__main__":
     else:
         raise NotImplementedError("Other simulators not supported")
 
+    if args.save_folder is not None:
+        if not os.path.exists(args.save_folder):
+            os.makedirs(os.path.join('..', 'results', args.save_folder), exist_ok=True)
+
     if args.mode == "single_press":
         sim = tac_sim(data_folder, filePath, obj, args.obj_scale_factor, args.override_hw)
         press_depth = args.depth
@@ -836,12 +841,12 @@ if __name__ == "__main__":
         heightMap, contact_mask, contact_height = sim.deformApprox(press_depth, height_map, gel_map, contact_mask)
         # simulate tactile images
         sim_img, shadow_sim_img = sim.simulating(heightMap, contact_mask, contact_height, shadow=True)
-        img_savePath = osp.join('..', 'results', obj[:-4]+'_sim.jpg')
-        shadow_savePath = osp.join('..', 'results', obj[:-4]+'_shadow.jpg')
-        height_savePath = osp.join('..', 'results', obj[:-4]+'_raw_height.jpg')
+        img_savePath = osp.join('..', 'results', args.save_folder, obj[:-4]+'_sim.jpg')
+        shadow_savePath = osp.join('..', 'results', args.save_folder, obj[:-4]+'_shadow.jpg')
+        height_savePath = osp.join('..', 'results', args.save_folder, obj[:-4]+'_raw_height.jpg')
 
-        raw_color_savePath = osp.join('..', 'results', obj[:-4]+'_raw_color.jpg')
-        raw_normal_savePath = osp.join('..', 'results', obj[:-4]+'_raw_normal.jpg')
+        raw_color_savePath = osp.join('..', 'results', args.save_folder, obj[:-4]+'_raw_color.jpg')
+        raw_normal_savePath = osp.join('..', 'results', args.save_folder, obj[:-4]+'_raw_normal.jpg')
         raw_color_img = np.astype(raw_color_map * 255, np.uint8)
         raw_normal_img = np.astype(vis_raw_normal_map * 255, np.uint8)
 
@@ -879,22 +884,22 @@ if __name__ == "__main__":
 
             if press_idx == 0:
                 sim_video = cv2.VideoWriter(
-                    osp.join('..', 'results', obj[:-4] + f'_sim_{press_min}_{press_max}.mp4'),
+                    osp.join('..', 'results', args.save_folder, obj[:-4] + f'_sim_{press_min}_{press_max}.mp4'),
                     cv2.VideoWriter_fourcc(*'mp4v'),
                     5.,
                     (sim_img.shape[1], sim_img.shape[0]))
                 shadow_sim_video = cv2.VideoWriter(
-                    osp.join('..', 'results', obj[:-4] + f'_shadow_{press_min}_{press_max}.mp4'),
+                    osp.join('..', 'results', args.save_folder, obj[:-4] + f'_shadow_{press_min}_{press_max}.mp4'),
                     cv2.VideoWriter_fourcc(*'mp4v'),
                     5.,
                     (shadow_sim_img.shape[1], shadow_sim_img.shape[0]))
                 raw_color_video = cv2.VideoWriter(
-                    osp.join('..', 'results', obj[:-4] + f'_raw_color_{press_min}_{press_max}.mp4'),
+                    osp.join('..', 'results', args.save_folder, obj[:-4] + f'_raw_color_{press_min}_{press_max}.mp4'),
                     cv2.VideoWriter_fourcc(*'mp4v'),
                     5.,
                     (raw_color_map.shape[1], raw_color_map.shape[0]))
                 raw_normal_video = cv2.VideoWriter(
-                    osp.join('..', 'results', obj[:-4] + f'_raw_normal_{press_min}_{press_max}.mp4'),
+                    osp.join('..', 'results', args.save_folder, obj[:-4] + f'_raw_normal_{press_min}_{press_max}.mp4'),
                     cv2.VideoWriter_fourcc(*'mp4v'),
                     5.,
                     (vis_raw_normal_map.shape[1], vis_raw_normal_map.shape[0]))
@@ -934,22 +939,22 @@ if __name__ == "__main__":
 
             if press_idx == 0:
                 sim_video = cv2.VideoWriter(
-                    osp.join('..', 'results', obj[:-4] + f'_sim_rot_{yaw_amplitude}_{pitch_amplitude}_{roll_amplitude}.mp4'),
+                    osp.join('..', 'results', args.save_folder, obj[:-4] + f'_sim_rot_{yaw_amplitude}_{pitch_amplitude}_{roll_amplitude}.mp4'),
                     cv2.VideoWriter_fourcc(*'mp4v'),
                     5.,
                     (sim_img.shape[1], sim_img.shape[0]))
                 shadow_sim_video = cv2.VideoWriter(
-                    osp.join('..', 'results', obj[:-4] + f'_shadow_rot_{yaw_amplitude}_{pitch_amplitude}_{roll_amplitude}.mp4'),
+                    osp.join('..', 'results', args.save_folder, obj[:-4] + f'_shadow_rot_{yaw_amplitude}_{pitch_amplitude}_{roll_amplitude}.mp4'),
                     cv2.VideoWriter_fourcc(*'mp4v'),
                     5.,
                     (shadow_sim_img.shape[1], shadow_sim_img.shape[0]))
                 raw_color_video = cv2.VideoWriter(
-                    osp.join('..', 'results', obj[:-4] + f'_raw_color_rot_{yaw_amplitude}_{pitch_amplitude}_{roll_amplitude}.mp4'),
+                    osp.join('..', 'results', args.save_folder, obj[:-4] + f'_raw_color_rot_{yaw_amplitude}_{pitch_amplitude}_{roll_amplitude}.mp4'),
                     cv2.VideoWriter_fourcc(*'mp4v'),
                     5.,
                     (raw_color_map.shape[1], raw_color_map.shape[0]))
                 raw_normal_video = cv2.VideoWriter(
-                    osp.join('..', 'results', obj[:-4] + f'_raw_normal_rot_{yaw_amplitude}_{pitch_amplitude}_{roll_amplitude}.mp4'),
+                    osp.join('..', 'results', args.save_folder, obj[:-4] + f'_raw_normal_rot_{yaw_amplitude}_{pitch_amplitude}_{roll_amplitude}.mp4'),
                     cv2.VideoWriter_fourcc(*'mp4v'),
                     5.,
                     (vis_raw_normal_map.shape[1], vis_raw_normal_map.shape[0]))
@@ -983,22 +988,22 @@ if __name__ == "__main__":
 
             if press_idx == 0:
                 sim_video = cv2.VideoWriter(
-                    osp.join('..', 'results', obj[:-4] + f'_sim_slide_{dx_min}_{dx_max}_{dy_min}_{dy_max}.mp4'),
+                    osp.join('..', 'results', args.save_folder, obj[:-4] + f'_sim_slide_{dx_min}_{dx_max}_{dy_min}_{dy_max}.mp4'),
                     cv2.VideoWriter_fourcc(*'mp4v'),
                     5.,
                     (sim_img.shape[1], sim_img.shape[0]))
                 shadow_sim_video = cv2.VideoWriter(
-                    osp.join('..', 'results', obj[:-4] + f'_shadow_slide_{dx_min}_{dx_max}_{dy_min}_{dy_max}.mp4'),
+                    osp.join('..', 'results', args.save_folder, obj[:-4] + f'_shadow_slide_{dx_min}_{dx_max}_{dy_min}_{dy_max}.mp4'),
                     cv2.VideoWriter_fourcc(*'mp4v'),
                     5.,
                     (shadow_sim_img.shape[1], shadow_sim_img.shape[0]))
                 raw_color_video = cv2.VideoWriter(
-                    osp.join('..', 'results', obj[:-4] + f'_raw_color_slide_{dx_min}_{dx_max}_{dy_min}_{dy_max}.mp4'),
+                    osp.join('..', 'results', args.save_folder, obj[:-4] + f'_raw_color_slide_{dx_min}_{dx_max}_{dy_min}_{dy_max}.mp4'),
                     cv2.VideoWriter_fourcc(*'mp4v'),
                     5.,
                     (raw_color_map.shape[1], raw_color_map.shape[0]))
                 raw_normal_video = cv2.VideoWriter(
-                    osp.join('..', 'results', obj[:-4] + f'_raw_normal_slide_{dx_min}_{dx_max}_{dy_min}_{dy_max}.mp4'),
+                    osp.join('..', 'results', args.save_folder, obj[:-4] + f'_raw_normal_slide_{dx_min}_{dx_max}_{dy_min}_{dy_max}.mp4'),
                     cv2.VideoWriter_fourcc(*'mp4v'),
                     5.,
                     (vis_raw_normal_map.shape[1], vis_raw_normal_map.shape[0]))
