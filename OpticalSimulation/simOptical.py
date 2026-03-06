@@ -788,6 +788,18 @@ class mesh_simulator(simulator):
 
         return zq, gel_map, contact_mask, rawcolorMap, rawnormalMap, vis_rawnormalMap, heightMap
 
+def height2laplacian(H):
+    """
+    Convert a height map to gradient map.
+
+    :param H: np.array (H, W); the height map.
+    :return L: np.array (H, W); the curvature map.
+    """
+    gy, gx = np.gradient(H)
+    L = np.gradient(gx, axis=1) + np.gradient(gy, axis=0)
+    L = cv2.GaussianBlur(L, (5, 5), 0)
+    L = np.astype(255 * (L - L.min()) / (L.max() - L.min()), np.uint8)
+    return L
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -876,9 +888,9 @@ if __name__ == "__main__":
             dy = 0
 
             # generate height map
-            height_map, gel_map, contact_mask, raw_color_map, raw_normal_map, vis_raw_normal_map, raw_height_map = sim.generateHeightMap(gelpad_model_path, press_depth, dx, dy, contact_point=contact_point, contact_theta=args.contact_theta)
+            height_map, gel_map, render_contact_mask, raw_color_map, raw_normal_map, vis_raw_normal_map, raw_height_map = sim.generateHeightMap(gelpad_model_path, press_depth, dx, dy, contact_point=contact_point, contact_theta=args.contact_theta)
             # approximate the soft deformation
-            heightMap, contact_mask, contact_height = sim.deformApprox(press_depth, height_map, gel_map, contact_mask)
+            heightMap, contact_mask, contact_height = sim.deformApprox(press_depth, height_map, gel_map, render_contact_mask)
             # simulate tactile images
             sim_img, shadow_sim_img = sim.simulating(heightMap, contact_mask, contact_height, shadow=True)
 
@@ -903,6 +915,21 @@ if __name__ == "__main__":
                     cv2.VideoWriter_fourcc(*'mp4v'),
                     5.,
                     (vis_raw_normal_map.shape[1], vis_raw_normal_map.shape[0]))
+                mask_video = cv2.VideoWriter(
+                    osp.join('..', 'results', args.save_folder, obj[:-4] + f'_mask_{press_min}_{press_max}.mp4'),
+                    cv2.VideoWriter_fourcc(*'mp4v'),
+                    5.,
+                    (sim_img.shape[1], sim_img.shape[0]), isColor=False)
+                render_mask_video = cv2.VideoWriter(
+                    osp.join('..', 'results', args.save_folder, obj[:-4] + f'_render_mask_{press_min}_{press_max}.mp4'),
+                    cv2.VideoWriter_fourcc(*'mp4v'),
+                    5.,
+                    (sim_img.shape[1], sim_img.shape[0]), isColor=False)
+                cuvature_video = cv2.VideoWriter(
+                    osp.join('..', 'results', args.save_folder, obj[:-4] + f'_curvature_{press_min}_{press_max}.mp4'),
+                    cv2.VideoWriter_fourcc(*'mp4v'),
+                    5.,
+                    (sim_img.shape[1], sim_img.shape[0]), isColor=False)
 
             sim_video.write(cv2.cvtColor(np.astype(sim_img, np.uint8), cv2.COLOR_RGB2BGR))
             shadow_sim_video.write(cv2.cvtColor(np.astype(shadow_sim_img, np.uint8), cv2.COLOR_RGB2BGR))
@@ -912,9 +939,18 @@ if __name__ == "__main__":
             raw_color_video.write(cv2.cvtColor(raw_color_img, cv2.COLOR_RGB2BGR))
             raw_normal_video.write(cv2.cvtColor(raw_normal_img, cv2.COLOR_RGB2BGR))
 
+            mask_video.write(np.astype(contact_mask * 255, np.uint8))
+            render_mask_video.write(np.astype(render_contact_mask * 255, np.uint8))
+            cuvature_video.write(np.astype(height2laplacian(raw_height_map), np.uint8))
+
             if press_idx == num_step - 1:
                 sim_video.release()
                 shadow_sim_video.release()
+                raw_color_video.release()
+                raw_normal_video.release()
+                mask_video.release()
+                render_mask_video.release()
+                cuvature_video.release()
     elif args.mode == "rotating_press":
         sim = tac_sim(data_folder, filePath, obj, args.obj_scale_factor, args.override_hw)
         yaw_amplitude, pitch_amplitude, roll_amplitude, num_step, press_depth = args.rot_range_info
