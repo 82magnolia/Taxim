@@ -925,7 +925,7 @@ if __name__ == "__main__":
                     cv2.VideoWriter_fourcc(*'mp4v'),
                     5.,
                     (sim_img.shape[1], sim_img.shape[0]), isColor=False)
-                cuvature_video = cv2.VideoWriter(
+                curvature_video = cv2.VideoWriter(
                     osp.join('..', 'results', args.save_folder, obj[:-4] + f'_curvature_{press_min}_{press_max}.mp4'),
                     cv2.VideoWriter_fourcc(*'mp4v'),
                     5.,
@@ -941,7 +941,7 @@ if __name__ == "__main__":
 
             mask_video.write(np.astype(contact_mask * 255, np.uint8))
             render_mask_video.write(np.astype(render_contact_mask * 255, np.uint8))
-            cuvature_video.write(np.astype(height2laplacian(raw_height_map), np.uint8))
+            curvature_video.write(np.astype(height2laplacian(raw_height_map), np.uint8))
 
             if press_idx == num_step - 1:
                 sim_video.release()
@@ -950,7 +950,7 @@ if __name__ == "__main__":
                 raw_normal_video.release()
                 mask_video.release()
                 render_mask_video.release()
-                cuvature_video.release()
+                curvature_video.release()
     elif args.mode == "rotating_press":
         sim = tac_sim(data_folder, filePath, obj, args.obj_scale_factor, args.override_hw)
         yaw_amplitude, pitch_amplitude, roll_amplitude, num_step, press_depth = args.rot_range_info
