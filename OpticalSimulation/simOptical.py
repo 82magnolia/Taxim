@@ -22,8 +22,6 @@ from matplotlib import colormaps
 import trimesh
 import pyrender
 
-os.environ['PYOPENGL_PLATFORM'] = 'egl'
-
 
 def rot_from_ypr(ypr_array):
     def _ypr2mtx(ypr):
@@ -708,8 +706,8 @@ class mesh_simulator(simulator):
         rgb_mesh = pyrender.Mesh.from_trimesh(rgb_tr_mesh, smooth=False)
 
         normal_tr_mesh = trimesh.Trimesh(vertices=sim_vertices, faces=self.tr_mesh.faces)
-        normal_tr_mesh.visual.vertex_colors = np.astype(255 * (normal_tr_mesh.vertex_normals + 1.0) / 2., np.uint8)
-        normal_tr_mesh.visual.face_colors = np.astype(255 * (normal_tr_mesh.face_normals + 1.0) / 2., np.uint8)
+        normal_tr_mesh.visual.vertex_colors = (255 * (normal_tr_mesh.vertex_normals + 1.0) / 2.).astype(np.uint8)
+        normal_tr_mesh.visual.face_colors = (255 * (normal_tr_mesh.face_normals + 1.0) / 2.).astype(np.uint8)
         normal_mesh = pyrender.Mesh.from_trimesh(normal_tr_mesh, smooth=False)
 
         # Set up scene
@@ -758,7 +756,7 @@ class mesh_simulator(simulator):
 
         # Obtain normal map
         normal_rgb, _ = self.normal_renderer.render(normal_scene, flags=pyrender.RenderFlags.FLAT)
-        normal = 2 * np.astype(normal_rgb, float) / 255 - 1.
+        normal = 2 * normal_rgb.astype(float) / 255 - 1.
         invalid_normal_loc = np.all(normal_rgb == 255, axis=-1)
         normal[invalid_normal_loc] = 0.
         normal[~invalid_normal_loc] = normal[~invalid_normal_loc] / np.linalg.norm(normal[~invalid_normal_loc], axis=-1, keepdims=True)
@@ -798,7 +796,7 @@ def height2laplacian(H):
     gy, gx = np.gradient(H)
     L = np.gradient(gx, axis=1) + np.gradient(gy, axis=0)
     L = cv2.GaussianBlur(L, (5, 5), 0)
-    L = np.astype(255 * (L - L.min()) / (L.max() - L.min()), np.uint8)
+    L = (255 * (L - L.min()) / (L.max() - L.min())).astype(np.uint8)
     return L
 
 if __name__ == "__main__":
@@ -859,14 +857,14 @@ if __name__ == "__main__":
 
         raw_color_savePath = osp.join('..', 'results', args.save_folder, obj[:-4]+'_raw_color.jpg')
         raw_normal_savePath = osp.join('..', 'results', args.save_folder, obj[:-4]+'_raw_normal.jpg')
-        raw_color_img = np.astype(raw_color_map * 255, np.uint8)
-        raw_normal_img = np.astype(vis_raw_normal_map * 255, np.uint8)
+        raw_color_img = (raw_color_map * 255).astype(np.uint8)
+        raw_normal_img = (vis_raw_normal_map * 255).astype(np.uint8)
 
         cv2.imwrite(img_savePath, sim_img)
         cv2.imwrite(shadow_savePath, shadow_sim_img)
 
         norm_raw_height_map = colormaps.get_cmap("viridis")((raw_height_map - raw_height_map.min()) / (raw_height_map.max() - raw_height_map.min() + 1e-6))
-        norm_raw_height_map = np.astype(norm_raw_height_map * 255, np.uint8)
+        norm_raw_height_map = (norm_raw_height_map * 255).astype(np.uint8)
         cv2.imwrite(height_savePath, cv2.cvtColor(norm_raw_height_map, cv2.COLOR_RGB2BGR))
 
         cv2.imwrite(raw_color_savePath, cv2.cvtColor(raw_color_img, cv2.COLOR_RGB2BGR))
@@ -931,17 +929,17 @@ if __name__ == "__main__":
                     5.,
                     (sim_img.shape[1], sim_img.shape[0]), isColor=False)
 
-            sim_video.write(cv2.cvtColor(np.astype(sim_img, np.uint8), cv2.COLOR_RGB2BGR))
-            shadow_sim_video.write(cv2.cvtColor(np.astype(shadow_sim_img, np.uint8), cv2.COLOR_RGB2BGR))
+            sim_video.write(cv2.cvtColor(sim_img.astype(np.uint8), cv2.COLOR_RGB2BGR))
+            shadow_sim_video.write(cv2.cvtColor(shadow_sim_img.astype(np.uint8), cv2.COLOR_RGB2BGR))
 
-            raw_color_img = np.astype(raw_color_map * 255, np.uint8)
-            raw_normal_img = np.astype(vis_raw_normal_map * 255, np.uint8)
+            raw_color_img = (raw_color_map * 255).astype(np.uint8)
+            raw_normal_img = (vis_raw_normal_map * 255).astype(np.uint8)
             raw_color_video.write(cv2.cvtColor(raw_color_img, cv2.COLOR_RGB2BGR))
             raw_normal_video.write(cv2.cvtColor(raw_normal_img, cv2.COLOR_RGB2BGR))
 
-            mask_video.write(np.astype(contact_mask * 255, np.uint8))
-            render_mask_video.write(np.astype(render_contact_mask * 255, np.uint8))
-            curvature_video.write(np.astype(height2laplacian(raw_height_map), np.uint8))
+            mask_video.write((contact_mask * 255).astype(np.uint8))
+            render_mask_video.write((render_contact_mask * 255).astype(np.uint8))
+            curvature_video.write(height2laplacian(raw_height_map).astype(np.uint8))
 
             if press_idx == num_step - 1:
                 sim_video.release()
@@ -995,11 +993,11 @@ if __name__ == "__main__":
                     5.,
                     (vis_raw_normal_map.shape[1], vis_raw_normal_map.shape[0]))
 
-            sim_video.write(cv2.cvtColor(np.astype(sim_img, np.uint8), cv2.COLOR_RGB2BGR))
-            shadow_sim_video.write(cv2.cvtColor(np.astype(shadow_sim_img, np.uint8), cv2.COLOR_RGB2BGR))
+            sim_video.write(cv2.cvtColor(sim_img.astype(np.uint8), cv2.COLOR_RGB2BGR))
+            shadow_sim_video.write(cv2.cvtColor(shadow_sim_img.astype(np.uint8), cv2.COLOR_RGB2BGR))
 
-            raw_color_img = np.astype(raw_color_map * 255, np.uint8)
-            raw_normal_img = np.astype(vis_raw_normal_map * 255, np.uint8)
+            raw_color_img = (raw_color_map * 255).astype(np.uint8)
+            raw_normal_img = (vis_raw_normal_map * 255).astype(np.uint8)
             raw_color_video.write(cv2.cvtColor(raw_color_img, cv2.COLOR_RGB2BGR))
             raw_normal_video.write(cv2.cvtColor(raw_normal_img, cv2.COLOR_RGB2BGR))
 
@@ -1044,11 +1042,11 @@ if __name__ == "__main__":
                     5.,
                     (vis_raw_normal_map.shape[1], vis_raw_normal_map.shape[0]))
 
-            sim_video.write(cv2.cvtColor(np.astype(sim_img, np.uint8), cv2.COLOR_RGB2BGR))
-            shadow_sim_video.write(cv2.cvtColor(np.astype(shadow_sim_img, np.uint8), cv2.COLOR_RGB2BGR))
+            sim_video.write(cv2.cvtColor(sim_img.astype(np.uint8), cv2.COLOR_RGB2BGR))
+            shadow_sim_video.write(cv2.cvtColor(shadow_sim_img.astype(np.uint8), cv2.COLOR_RGB2BGR))
 
-            raw_color_img = np.astype(raw_color_map * 255, np.uint8)
-            raw_normal_img = np.astype(vis_raw_normal_map * 255, np.uint8)
+            raw_color_img = (raw_color_map * 255).astype(np.uint8)
+            raw_normal_img = (vis_raw_normal_map * 255).astype(np.uint8)
             raw_color_video.write(cv2.cvtColor(raw_color_img, cv2.COLOR_RGB2BGR))
             raw_normal_video.write(cv2.cvtColor(raw_normal_img, cv2.COLOR_RGB2BGR))
 

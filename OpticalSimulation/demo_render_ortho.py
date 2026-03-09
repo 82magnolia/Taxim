@@ -125,8 +125,8 @@ def render_orthographic(
 
     # Make a copy mesh storing normals as colors
     copy_tr_mesh = trimesh.Trimesh(vertices=tr_mesh.vertices, faces=tr_mesh.faces)
-    copy_tr_mesh.visual.vertex_colors = np.astype(255 * (copy_tr_mesh.vertex_normals + 1.0) / 2., np.uint8)
-    copy_tr_mesh.visual.face_colors = np.astype(255 * (copy_tr_mesh.face_normals + 1.0) / 2., np.uint8)
+    copy_tr_mesh.visual.vertex_colors = (255 * (copy_tr_mesh.vertex_normals + 1.0) / 2.).astype(np.uint8)
+    copy_tr_mesh.visual.face_colors = (255 * (copy_tr_mesh.face_normals + 1.0) / 2.).astype(np.uint8)
     copy_mesh = pyrender.Mesh.from_trimesh(copy_tr_mesh, smooth=False)
     normal_r = pyrender.OffscreenRenderer(
         viewport_width=img_size[0],
@@ -139,7 +139,7 @@ def render_orthographic(
     normal_scene.add(light, pose=T_wc)
 
     normal_rgb, _ = normal_r.render(normal_scene, flags=pyrender.RenderFlags.FLAT)
-    normal = 2 * np.astype(normal_rgb, float) / 255 - 1.
+    normal = 2 * normal_rgb.astype(float) / 255 - 1.
     invalid_normal_loc = np.all(normal_rgb == 255, axis=-1)
     normal[invalid_normal_loc] = 0.
     normal[~invalid_normal_loc] = normal[~invalid_normal_loc] / np.linalg.norm(normal[~invalid_normal_loc], axis=-1, keepdims=True)

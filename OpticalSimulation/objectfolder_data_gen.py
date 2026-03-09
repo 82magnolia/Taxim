@@ -1,4 +1,5 @@
 import os
+os.environ['PYOPENGL_PLATFORM'] = 'egl'
 import argparse
 from tqdm import tqdm
 from OpticalSimulation.simOptical import mesh_simulator
@@ -8,8 +9,6 @@ import cv2
 from matplotlib import colormaps
 import pyrender
 import Basics.sensorParams as psp
-
-os.environ['PYOPENGL_PLATFORM'] = 'egl'
 
 
 if __name__ == "__main__":
@@ -123,11 +122,11 @@ if __name__ == "__main__":
                 height_map, gel_map, contact_mask, raw_color_map, raw_normal_map, vis_raw_normal_map, raw_height_map = sim.generateHeightMap(gelpad_model_path, press_depth, 0, 0, contact_point=contact_point, contact_theta=args.contact_theta)
 
                 # Save images
-                raw_color_img = np.astype(raw_color_map * 255, np.uint8)
-                raw_normal_img = np.astype(vis_raw_normal_map * 255, np.uint8)
+                raw_color_img = (raw_color_map * 255).astype(np.uint8)
+                raw_normal_img = (vis_raw_normal_map * 255).astype(np.uint8)
 
                 norm_raw_height_map = colormaps.get_cmap("viridis")((raw_height_map - raw_height_map.min()) / (raw_height_map.max() - raw_height_map.min() + 1e-6))
-                norm_raw_height_map = np.astype(norm_raw_height_map * 255, np.uint8)
+                norm_raw_height_map = (norm_raw_height_map * 255).astype(np.uint8)
                 cv2.imwrite(height_save_path, cv2.cvtColor(norm_raw_height_map, cv2.COLOR_RGB2BGR))
 
                 cv2.imwrite(color_save_path, cv2.cvtColor(raw_color_img, cv2.COLOR_RGB2BGR))
@@ -147,14 +146,14 @@ if __name__ == "__main__":
                 sim_img, shadow_sim_img = sim.simulating(heightMap, contact_mask, contact_height, shadow=True)
 
                 # Save images
-                raw_color_img = np.astype(raw_color_map * 255, np.uint8)
-                raw_normal_img = np.astype(vis_raw_normal_map * 255, np.uint8)
+                raw_color_img = (raw_color_map * 255).astype(np.uint8)
+                raw_normal_img = (vis_raw_normal_map * 255).astype(np.uint8)
 
                 cv2.imwrite(sim_save_path, sim_img)
                 cv2.imwrite(shadow_save_path, shadow_sim_img)
 
                 norm_raw_height_map = colormaps.get_cmap("viridis")((raw_height_map - raw_height_map.min()) / (raw_height_map.max() - raw_height_map.min() + 1e-6))
-                norm_raw_height_map = np.astype(norm_raw_height_map * 255, np.uint8)
+                norm_raw_height_map = (norm_raw_height_map * 255).astype(np.uint8)
                 cv2.imwrite(height_save_path, cv2.cvtColor(norm_raw_height_map, cv2.COLOR_RGB2BGR))
 
                 cv2.imwrite(color_save_path, cv2.cvtColor(raw_color_img, cv2.COLOR_RGB2BGR))
